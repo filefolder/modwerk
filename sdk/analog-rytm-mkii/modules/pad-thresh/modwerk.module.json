@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
-  "id": "pad-probe",
-  "name": "Pad Probe",
+  "id": "pad-thresh",
+  "name": "Pad Thresh",
   "version": "0.1.0-experimental",
   "machine": "analog-rytm-mkii",
   "category": "system",
@@ -16,24 +16,24 @@
     "filefolder"
   ],
   "presentation": {
-    "label": "PAD PROBE",
+    "label": "PAD THRESH",
     "family": "Diagnostic",
-    "summary": "Shows what a pad hit carries, to find where its velocity lives.",
-    "overview": "A throwaway diagnostic for the Analog Rytm MKII. On every pad press it shows the raw words of the key event on the screen, and which bits changed since the first press, so a light and a hard tap reveal where the velocity is. It consumes no event: pads, mutes and sounds behave as on stock. Not for release.",
+    "summary": "Shows and adjusts the pad strike threshold live, to test the pads' light-touch response.",
+    "overview": "A throwaway experiment for the Analog Rytm MKII. Stock ignores a pad strike whose force is at or below a threshold. This mod shows the memory around that threshold and lowers or raises it live with FUNC + encoder H, once it has confirmed the stock value is at the expected address. RAM only: a power cycle restores stock. Not for release.",
     "highlights": [
-      "Shows the raw event words of each pad press",
-      "Marks the bits that change between a light and a hard tap"
+      "Shows the threshold's memory on the screen",
+      "Changes the threshold live, only after finding the stock value"
     ],
     "usage": [
-      "Tap one pad lightly and read the screen, then tap it hard and compare."
+      "Hold FUNC and turn encoder H, then tap the pads lightly and compare."
     ]
   },
   "access": {
-    "location": "A full-screen overlay for about 10 s after each pad press.",
+    "location": "A full-screen overlay for about 10 s after each FUNC + encoder H turn.",
     "steps": [
       "Install the build and boot the unit.",
-      "Press any pad: the overlay appears.",
-      "Press NO to reset the baseline."
+      "Hold FUNC and turn encoder H: the overlay appears and the threshold changes.",
+      "Tap the pads and judge how light a touch plays."
     ],
     "screenshots": []
   },
@@ -46,7 +46,8 @@
     "conflicts": [],
     "limitations": [
       "Diagnostic only: not for release.",
-      "Reads 8 words from the key event; whether the event is that long is not known."
+      "The threshold's address comes from an emulator note (rytm-emu) and is not confirmed on a unit.",
+      "Writes only when the stock value 10 is found at that address."
     ]
   },
   "platform": {
@@ -56,9 +57,11 @@
     "events": [
       "ev_tick",
       "ev_draw",
-      "ev_key"
+      "ev_enc"
     ],
-    "claims": []
+    "claims": [
+      "ui:FUNC + encoder H turn"
+    ]
   },
   "resources": {
     "memoryBytes": null,
@@ -90,8 +93,8 @@
     {
       "path": "media/thumbnail.svg",
       "kind": "thumbnail",
-      "caption": "Pad Probe thumbnail",
-      "alt": "Placeholder thumbnail for Pad Probe",
+      "caption": "Pad Thresh thumbnail",
+      "alt": "Placeholder thumbnail for Pad Thresh",
       "credit": "filefolder",
       "license": "GPL-3.0-or-later",
       "source": "Original placeholder from the Modwerk SDK template; replace with your own artwork."
