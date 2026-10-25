@@ -1,19 +1,35 @@
 {
   "schemaVersion": 1,
-  "sources": ["src/main.c"],
+  "sources": [
+    "src/main.c"
+  ],
   "defsym": {},
   "cflags": [],
   "weak": [],
   "subscribe": [
-    { "event": "ev_tick", "fn": "pad_thresh_tick", "order": 50 },
-    { "event": "ev_draw", "fn": "pad_thresh_draw", "order": 50 },
-    { "event": "ev_enc", "fn": "pad_thresh_enc", "order": 50 }
+    {
+      "event": "ev_tick",
+      "fn": "pad_thresh_tick",
+      "order": 50
+    },
+    {
+      "event": "ev_draw",
+      "fn": "pad_thresh_draw",
+      "order": 50
+    },
+    {
+      "event": "ev_enc",
+      "fn": "pad_thresh_enc",
+      "order": 50
+    }
   ],
   "contribute": [],
   "collections": {},
   "copied": [],
   "regions": [],
-  "claims": ["ui:FUNC + encoder H turn"],
+  "claims": [
+    "ui:FUNC + encoder H turn"
+  ],
   "requires": [],
   "derive": null,
   "releases": {
@@ -23,8 +39,7 @@
         "-DFILLRECT_AT=0x40070726",
         "-DIS_KEY_HELD_AT=0x40081c28",
         "-DTHRESH_AT=0x40285624",
-        "-DDUMP_A_AT=0x40285600",
-        "-DDUMP_B_AT=0x40285620"
+        "-DMAP_AT=0x40285608"
       ],
       "sites": []
     }

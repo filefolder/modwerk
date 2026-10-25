@@ -1,0 +1,24 @@
+{
+ "id": "pad-thresh",
+ "version": "0.1",
+ "title": "Pad strike threshold experiment",
+ "category": "Diagnostic",
+ "author": "filefolder",
+ "license": "GPL-3.0-or-later",
+ "description": "Throwaway experiment, not for release. FUNC + turn encoder H shows the memory around the pad strike threshold and changes it live (RAM only), once the pad map and the stock value 10 are found.",
+ "device": "analog-rytm-mk2",
+ "os": "1.74",
+ "sources": ["main.c"],
+ "cflags": [
+  "-DFILLRECT_AT=0x40070726",
+  "-DIS_KEY_HELD_AT=0x40081c28",
+  "-DTHRESH_AT=0x40285624",
+  "-DMAP_AT=0x40285608"
+ ],
+ "subscribe": [
+  {"event": "ev_tick", "fn": "pad_thresh_tick", "order": 50},
+  {"event": "ev_draw", "fn": "pad_thresh_draw", "order": 50},
+  {"event": "ev_enc", "fn": "pad_thresh_enc", "order": 50}
+ ],
+ "requires": ["core"]
+}
