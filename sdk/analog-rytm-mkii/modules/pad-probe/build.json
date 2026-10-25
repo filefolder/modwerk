@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "sources": ["src/main.c"],
+  "defsym": {},
+  "cflags": [],
+  "weak": [],
+  "subscribe": [
+    { "event": "ev_tick", "fn": "pad_probe_tick", "order": 50 },
+    { "event": "ev_draw", "fn": "pad_probe_draw", "order": 50 },
+    { "event": "ev_key", "fn": "pad_probe_key", "order": 50 }
+  ],
+  "contribute": [],
+  "collections": {},
+  "copied": [],
+  "regions": [],
+  "claims": [],
+  "requires": [],
+  "derive": null,
+  "releases": {
+    "1.74": {
+      "defsym": {},
+      "cflags": ["-DFILLRECT_AT=0x40070726"],
+      "sites": []
+    }
+  }
+}

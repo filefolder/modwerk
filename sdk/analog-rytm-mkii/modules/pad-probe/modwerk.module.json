@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 3,
+  "id": "pad-probe",
+  "name": "Pad Probe",
+  "version": "0.1.0-experimental",
+  "machine": "analog-rytm-mkii",
+  "category": "system",
+  "exclusive": false,
+  "author": {
+    "github": "filefolder",
+    "credits": [
+      "filefolder"
+    ]
+  },
+  "maintainers": [
+    "filefolder"
+  ],
+  "presentation": {
+    "label": "PAD PROBE",
+    "family": "Diagnostic",
+    "summary": "Shows what a pad hit carries, to find where its velocity lives.",
+    "overview": "A throwaway diagnostic for the Analog Rytm MKII. On every pad press it shows the raw words of the key event on the screen, and which bits changed since the first press, so a light and a hard tap reveal where the velocity is. It consumes no event: pads, mutes and sounds behave as on stock. Not for release.",
+    "highlights": [
+      "Shows the raw event words of each pad press",
+      "Marks the bits that change between a light and a hard tap"
+    ],
+    "usage": [
+      "Tap one pad lightly and read the screen, then tap it hard and compare."
+    ]
+  },
+  "access": {
+    "location": "A full-screen overlay for about 10 s after each pad press.",
+    "steps": [
+      "Install the build and boot the unit.",
+      "Press any pad: the overlay appears.",
+      "Press NO to reset the baseline."
+    ],
+    "screenshots": []
+  },
+  "controls": [],
+  "compatibility": {
+    "releases": [
+      "1.74"
+    ],
+    "requires": [],
+    "conflicts": [],
+    "limitations": [
+      "Diagnostic only: not for release.",
+      "Reads 8 words from the key event; whether the event is that long is not known."
+    ]
+  },
+  "platform": {
+    "kind": "elemod",
+    "core": "0.3",
+    "build": "build.json",
+    "events": [
+      "ev_tick",
+      "ev_draw",
+      "ev_key"
+    ],
+    "claims": []
+  },
+  "resources": {
+    "memoryBytes": null,
+    "fastBytes": null,
+    "load": {
+      "display": "Not measured yet",
+      "method": "unmeasured",
+      "conditions": "Measure with every track playing, parameters modulated and the mod at its heaviest setting."
+    }
+  },
+  "evidence": {
+    "tier": "none",
+    "moduleVersion": "0.1.0-experimental",
+    "sourceSha256": null,
+    "reports": [],
+    "hardware": null,
+    "verifiedBy": null
+  },
+  "tests": {
+    "report": "TESTING.md",
+    "summary": "Not tested yet."
+  },
+  "license": {
+    "spdx": "GPL-3.0-or-later",
+    "file": "LICENSE",
+    "declaration": "Original work by the author. Replace if you choose another GPL-compatible licence."
+  },
+  "media": [
+    {
+      "path": "media/thumbnail.svg",
+      "kind": "thumbnail",
+      "caption": "Pad Probe thumbnail",
+      "alt": "Placeholder thumbnail for Pad Probe",
+      "credit": "filefolder",
+      "license": "GPL-3.0-or-later",
+      "source": "Original placeholder from the Modwerk SDK template; replace with your own artwork."
+    }
+  ]
+}
