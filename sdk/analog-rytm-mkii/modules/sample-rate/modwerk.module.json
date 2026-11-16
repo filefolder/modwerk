@@ -1,0 +1,242 @@
+{
+  "schemaVersion": 3,
+  "id": "sample-rate",
+  "name": "Improved SMPL",
+  "version": "0.5.1-experimental",
+  "machine": "analog-rytm-mkii",
+  "category": "playback",
+  "exclusive": false,
+  "author": {
+    "github": "npp1993",
+    "name": "Nathaniel Pavel",
+    "credits": [
+      "Nathaniel Pavel (@npp1993) — the mod, its design and code, and this Modwerk module."
+    ]
+  },
+  "maintainers": [
+    "npp1993"
+  ],
+  "presentation": {
+    "label": "IMPROVED SMPL",
+    "family": "Sample playback",
+    "summary": "The SAMPLE page, improved: TUN turns in cents, FIN's knob is RATE (pure sample speed, to a stop and into reverse), and SMPL always shows the waveform, with the values that matter in one row.",
+    "overview": "Improved SMPL improves the Rytm's SAMPLE page. TUN turns 1 cent a step, faster as you spin it; press and turn for whole semitones, which keep the cents. The value reads with two places, as LFO depth does: +3.07, +3.00. The cents are kept in TUN itself, so a saved sound plays the same pitch on stock OS, which only shows the whole number. FIN's knob is RATE on every sound, a pure speed control: +63 plays at normal speed, 0 stops, -64 plays backward at normal speed, in a straight line between them, as the Octatrack's RATE with its setting on PTCH. Stock's pitch stops at a quarter of the speed. A trig below 0 starts from END. RATE starts at +63 on a new or cleared sound; a sound saved with FIN at +0 (stock's default, and every sound saved before 0.3.0) loads stopped: turn RATE up to +63. The SMPL key always opens the waveform view (SMPL WAVEFORM); the knob-only view is gone. Its idle screen shows values, not names: TUN, RATE, BR, LOOP (OFF, ON, or PIPO with Ping Pong Loop) and LEV in one row over a taller waveform. STA and END show as their lines, and turning D opens stock's sample list; the header names whichever knob turns.",
+    "highlights": [
+      "Tune a sample in cents: turn TUN, press and turn for semitones.",
+      "Fine tuning saves in the sound itself and plays the same on stock OS.",
+      "Slow a sample to a dead stop and run it backward from FIN's knob, now RATE on every sound.",
+      "Exactly the Octatrack's range: +63 is 1x, 0 stops, -64 is -1x.",
+      "RATE is the name everywhere: the knob, the header and the LFO destinations.",
+      "SMPL always shows the waveform, taller, under one row of values: TUN, RATE, BR, LOOP, LEV.",
+      "Works beside LOP PIPO from Pipo Loop, without needing it."
+    ],
+    "usage": [
+      "Press SMPL and turn TUN slowly: it moves 1 cent a step and reads +0.01, +0.02. Spin it faster to cover more ground.",
+      "Press TUN's knob and turn: whole semitones, the cents kept.",
+      "Put a long sample on a track, with LOP ON, and set RATE (FIN's knob) to +63. Play the pad and turn RATE down: the sample slows like a stopping turntable and rests at 0.",
+      "Keep turning below 0: it runs backward, smoothly through the stop. A new trig now starts from END."
+    ]
+  },
+  "access": {
+    "location": "SAMPLE page (SMPL key, always the waveform view): TUN (encoder A) for fine tuning, RATE (encoder B, FIN's knob) for speed.",
+    "steps": [
+      "Select a track whose sound plays a sample, and press SMPL: the waveform view opens.",
+      "Turn encoder A (TUN) for cents; press and turn it for semitones.",
+      "Turn encoder B (RATE): +63 is normal speed, 0 stops, below 0 plays backward."
+    ],
+    "screenshots": [
+      "media/knob-fine-tun.png",
+      "media/knob-rate.png"
+    ]
+  },
+  "controls": [
+    {
+      "name": "TUN",
+      "default": 0,
+      "doc": "SAMPLE page, encoder A. -24.00 to +24.00 semitones. A plain turn moves 1 cent a step, with acceleration; press and turn moves whole semitones and keeps the cents. FUNC + turn jumps -24, 0, +24 as stock. Held trigs' locks take cents the same way. The value reads with two places, as LFO depth: +3.07, +3.00, and (0) at zero.",
+      "labels": null
+    },
+    {
+      "name": "RATE",
+      "default": 63,
+      "doc": "SAMPLE page, encoder B (FIN's knob), on every sound. +63 to -64: speed scales by |RATE| / 64, backward below 0, and +63 is exactly 1x. Starts at +63 on a new or cleared sound. TUN still multiplies it. Locks, LFOs and MIDI CC 25 reach it.",
+      "labels": null
+    },
+    {
+      "name": "SMPL key",
+      "default": null,
+      "doc": "Opens the SAMPLE page in its waveform view (SMPL WAVEFORM) every time; a second press stays there. One row of values over a taller waveform: TUN, RATE, BR, LOOP (OFF, ON, or PIPO with Ping Pong Loop) and LEV, where knobs A, B, C, G and H turn them. STA and END (E, F) show as their lines and D opens the sample list, as stock. While a knob turns, the header names it.",
+      "labels": null
+    }
+  ],
+  "compatibility": {
+    "releases": [
+      "1.74"
+    ],
+    "requires": [],
+    "conflicts": [],
+    "limitations": [
+      "Built for OS 1.74 only, with core-ar2 0.7.",
+      "The waveform view shows no text for STA, END and SMP: STA and END show as their lines, D's sample list as on stock. With a trig held, a lock on STA, END or SMP gets no box; locks on the row's five are boxed there.",
+      "The SAMPLE page's knob-only view is not shown. If another module adds a page behind the SMPL key, the knob view stays in the cycle.",
+      "Run on a unit by the author as SP03 to SP13 (0.1.x) and by the author's automated rig (0.2.0 and 0.3.0, TESTING.md). Two voices together, performance and scene locks and sound browser load are from rytm-emu or not run there.",
+      "A sound saved with FIN at +0 (stock's default, and every sound saved before 0.3.0 without SMP RATE) loads with RATE 0: the sample does not play until RATE is turned up. On stock OS a sound saved with RATE +63 plays about a semitone sharp (FIN as a detune).",
+      "MIDI CC 24 sets TUN in whole semitones and clears its cents, as stock's CC does; NRPN keeps them to 1/128 semitone.",
+      "Other screens (LFO destinations, a sound lock's list) and stock OS show TUN as a whole number.",
+      "A pattern with TUN locks in cents saves one more lock lane per track, of stock's 72; stock OS loads those locks with their cents.",
+      "RATE never goes above 1x by itself; TUN does, to stock's ceiling of about 4x.",
+      "With LOP OFF, once the sample has played out, changing RATE does not bring it back: trig again.",
+      "A change of direction on a looping voice waits until it is 32 frames clear of STA and END; a trig does not wait.",
+      "Sound locks, scene locks and performance locks on RATE have not been run.",
+      "A sample previewed with FUNC + YES in a sample list plays at 1x, as on stock, whatever the track's RATE or an LFO on it: stock plays a preview from its own slot 129, and the module plays any voice on a slot of 128 or above at 1x, forward."
+    ]
+  },
+  "platform": {
+    "kind": "elemod",
+    "core": "0.7",
+    "build": "build.json",
+    "events": [
+      "ev_tick",
+      "ev_enc"
+    ],
+    "claims": [
+      "param:FIN (id 40) is RATE: its names read RATE and its default is +63",
+      "param:TUN (id 39) turn and value text: fine in cents",
+      "screen:SAMPLE knob page (the SMPL key shows SMPL WAVEFORM only)",
+      "screen:SMPL WAVEFORM layout: one value row and a taller waveform"
+    ]
+  },
+  "resources": {
+    "memoryBytes": 2506,
+    "fastBytes": 0,
+    "load": {
+      "display": "Near nothing while no track's RATE is below 0; with one below 0, as 0.1.0 (about 0.8 % idle, measured)",
+      "method": "hardware",
+      "conditions": "Measured for 0.1.0 on an Analog Rytm MKII with a private telemetry base, sequencer stopped: removing it from the author's 16-module set lowered the idle block from 72.9 % to 72.1 %; that handler walked all eight voices every block. 0.3.0's handler returns at once while no track's RATE is below 0 and no voice is still going down; the two step-loop gates run on every voice, about 10 instructions each. Not measured for 0.3.0."
+    }
+  },
+  "evidence": {
+    "tier": "author-hardware",
+    "moduleVersion": "0.5.1-experimental",
+    "sourceSha256": "8645bba773bee01d6e0be5a8373be1d56c3c46aa1f8a00045ae2d274bd004c1e",
+    "reports": [
+      "TESTING.md"
+    ],
+    "hardware": {
+      "model": "Analog Rytm MKII",
+      "release": "1.74",
+      "testedOn": "2026-11-16",
+      "tester": "npp1993",
+      "durationMinutes": null,
+      "summary": "0.5.1 ran on npp1993's Analog Rytm MKII, OS 1.74, as SU02 (Modwerk base with the development link + Improved SMPL 0.5.1 only, sha256 3eb6830e…89fe), booted from RAM over the flashed build. The author previewed samples with FUNC + YES in GLOBAL > SAMPLES with the active track at RATE 0, +63 and -64 and with an LFO on RATE, and played the pads at several RATEs, and reports all good: the previews played at normal speed and pad play followed RATE.",
+      "limitations": [
+        "Reported by the author from playing; no automated rig case covers the preview.",
+        "The image holds the author's private development base (with the link), not the published base.",
+        "Not run on a unit: a Sound previewed from the SOUND BROWSER whose sample is not in the project; scene and performance locks on RATE."
+      ]
+    },
+    "verifiedBy": null
+  },
+  "tests": {
+    "report": "TESTING.md",
+    "summary": "Unit (0.5.1, SU02 from RAM, the author playing): sample previews at normal speed at RATE 0, +63, -64 and with an LFO on RATE; pad play follows RATE. rytm-emu (0.5.1): the preview matches stock where 0.5.0 left it silent or bent; normal play unchanged. Unit (0.5.0, combo RC38 to RC40): the value row, every knob, LOOP and PIPO, the playhead, lock boxes, the waveform after boot. Earlier versions: TESTING.md.",
+    "documentation": {
+      "tutorial": {
+        "title": "Quick tutorial",
+        "steps": [
+          "Press SMPL and turn TUN slowly: it moves 1 cent a step and reads +0.01, +0.02. Spin it faster to cover more ground.",
+          "Press TUN's knob and turn: whole semitones, the cents kept.",
+          "Put a long sample on a track, with LOP ON, and set RATE (FIN's knob) to +63. Play the pad and turn RATE down: the sample slows like a stopping turntable and rests at 0.",
+          "Keep turning below 0: it runs backward, smoothly through the stop. A new trig now starts from END."
+        ]
+      },
+      "screenshots": [
+        "media/knob-fine-tun.png",
+        "media/knob-rate.png",
+        "media/value-rate.png",
+        "media/lfo-rate.png"
+      ],
+      "captureRecord": "media/capture.json"
+    }
+  },
+  "license": {
+    "spdx": "GPL-3.0-or-later",
+    "file": "LICENSE",
+    "declaration": "Nathaniel Pavel's (@npp1993) original code under GPL-3.0-or-later. Each patch precondition is an address, a length and a SHA-256; no stock bytes are included."
+  },
+  "media": [
+    {
+      "path": "media/thumbnail.svg",
+      "kind": "thumbnail",
+      "caption": "Improved SMPL",
+      "alt": "A sample's play position climbs, slows to a stop at RATE 64, then runs backward.",
+      "credit": "Nathaniel Pavel",
+      "license": "GPL-3.0-or-later",
+      "source": "Original conceptual illustration in the shared signal-art style; not a device screenshot."
+    },
+    {
+      "path": "media/knob-fine-tun.png",
+      "kind": "screenshot",
+      "caption": "TUN turned one cent up reads +0.01 in the value row, with TUNE in the header.",
+      "alt": "SMPL WAVEFORM view: header TUNE; one row reading +0.01, +63, 0, ON, 100 above a tall ramp waveform.",
+      "credit": "Nathaniel Pavel documentation capture; Elektron interface",
+      "license": "LicenseRef-Rytm-UI-Documentation",
+      "source": "original",
+      "capture": {
+        "type": "emulator",
+        "release": "1.74",
+        "moduleVersion": "0.5.1-experimental",
+        "imageSha256": "08dcf7e5b7698d65da0bda16aad6f429ff2ca6e4c19d0d3cd92d08ffd6868074",
+        "setup": "Headless rytm-emu (dtboot) running SV12: core-ar2 0.7 and this folder's Improved SMPL 0.5.1-experimental, linked by Modwerk on stock OS 1.74, BD playing a generated ramp sample, RATE set to +63 by CC 25. Firmware-rendered 128x64 screen at 3x. UI documentation only."
+      }
+    },
+    {
+      "path": "media/knob-rate.png",
+      "kind": "screenshot",
+      "caption": "SMPL opens the waveform view: one row of values over a taller waveform.",
+      "alt": "SMPL WAVEFORM view: one row reading (0), +63, 0, ON, 100 above a tall ramp waveform; no STA, END or SMP text.",
+      "credit": "Nathaniel Pavel documentation capture; Elektron interface",
+      "license": "LicenseRef-Rytm-UI-Documentation",
+      "source": "original",
+      "capture": {
+        "type": "emulator",
+        "release": "1.74",
+        "moduleVersion": "0.5.1-experimental",
+        "imageSha256": "08dcf7e5b7698d65da0bda16aad6f429ff2ca6e4c19d0d3cd92d08ffd6868074",
+        "setup": "Headless rytm-emu (dtboot) running SV12: core-ar2 0.7 and this folder's Improved SMPL 0.5.1-experimental, linked by Modwerk on stock OS 1.74, BD playing a generated ramp sample, RATE set to +63 by CC 25. Firmware-rendered 128x64 screen at 3x. UI documentation only."
+      }
+    },
+    {
+      "path": "media/value-rate.png",
+      "kind": "screenshot",
+      "caption": "While RATE turns, the header reads RATE and the row its value.",
+      "alt": "SMPL WAVEFORM view with RATE in the header and +45 in RATE's place in the value row.",
+      "credit": "Nathaniel Pavel documentation capture; Elektron interface",
+      "license": "LicenseRef-Rytm-UI-Documentation",
+      "source": "original",
+      "capture": {
+        "type": "emulator",
+        "release": "1.74",
+        "moduleVersion": "0.5.1-experimental",
+        "imageSha256": "08dcf7e5b7698d65da0bda16aad6f429ff2ca6e4c19d0d3cd92d08ffd6868074",
+        "setup": "Headless rytm-emu (dtboot) running SV12: core-ar2 0.7 and this folder's Improved SMPL 0.5.1-experimental, linked by Modwerk on stock OS 1.74, BD playing a generated ramp sample, RATE set to +63 by CC 25. Firmware-rendered 128x64 screen at 3x. UI documentation only."
+      }
+    },
+    {
+      "path": "media/lfo-rate.png",
+      "kind": "screenshot",
+      "caption": "The LFO destination list names it SAMP:Rate.",
+      "alt": "LFO destination list with SAMP:Tune, SAMP:Rate, SAMP:Sample Slot and SAMP:Bit Reduction.",
+      "credit": "Nathaniel Pavel documentation capture; Elektron interface",
+      "license": "LicenseRef-Rytm-UI-Documentation",
+      "source": "original",
+      "capture": {
+        "type": "emulator",
+        "release": "1.74",
+        "moduleVersion": "0.5.1-experimental",
+        "imageSha256": "08dcf7e5b7698d65da0bda16aad6f429ff2ca6e4c19d0d3cd92d08ffd6868074",
+        "setup": "Headless rytm-emu (dtboot) running SV12: core-ar2 0.7 and this folder's Improved SMPL 0.5.1-experimental, linked by Modwerk on stock OS 1.74, BD playing a generated ramp sample, RATE set to +63 by CC 25. Firmware-rendered 128x64 screen at 3x. UI documentation only."
+      }
+    }
+  ]
+}

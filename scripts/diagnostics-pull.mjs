@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Elastic-2.0
+// Copyright (c) 2026 Jannik Aßfalg (repeat98)
 // Pulls the private Octatrack diagnostics members chose to share, for the owner and the owner's agents.
 // It uses a read-only key that opens only GET /api/admin/octatrack/diagnostics; the Worker holds its SHA-256.
 // Not part of npm run check. See docs/APP_DEVELOPMENT.md#private-diagnostics.
@@ -10,6 +12,8 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { DSP_REPORT_NAMES, describeStallFrames } from '../src/community/octatrack-diagnostics-contract.ts'
+import { crashNames, namesFor, withName } from '../src/dev/address-names.ts'
 
 const ROOT = new URL('..', import.meta.url)
 const SERVICE = 'modwerk-diagnostics-read'
@@ -40,19 +44,72 @@ export async function pullAll(page, from) {
 export const when = iso => new Date(iso).toLocaleString('sv-SE', { dateStyle: 'short', timeStyle: 'short' })
 const line = ({ createdAt, username, data }) => [when(createdAt), '@' + username, data.event, data.phase,
   data.error && 'error=' + data.error, data.result && 'result=' + data.result, data.refusal !== undefined && 'refusal=' + data.refusal,
-  data.buildKind, data.area && 'area=' + data.area, data.kind && 'type=' + data.kind, data.reason && 'reason=' + data.reason,
+  data.buildKind, data.area && 'area=' + data.area, data.kind && 'type=' + data.kind, data.step && 'step=' + data.step, data.reason && 'reason=' + data.reason,
   data.live?.cpu && 'cpu ' + data.live.cpu.map(percent).join('/'), data.modules?.map(module => module.id + '@' + module.catalogVersion).join(',')].filter(Boolean).join(' ')
 function percent(permille) { return (permille / 10).toFixed(1) + '%' }
+/** The loader's refusals (loader.h runtime_refusal), as a restore's set record names its first refused package's (modset.c). */
+const REFUSALS = Object.assign(['no refusal', 'malformed', 'module memory', 'conflict', 'no free handle', 'busy', 'DSP time', 'in use', 'stock bytes differ', 'a base event', 'a base feature down'],
+  { 0x100: 'the last start crashed or froze loading it' }) // modset.c's boot guard, past the loader's codes
 /** An incident from the unit's own log (diag.c): when in its session, what, and what the unit was doing. */
 const ids = r => [...r.machines, ...r.fx, ...r.keys].slice(0, 4 * r.a).map((b, i, all) => i % 4 ? '' : all.slice(i, i + 4).map(x => x.toString(16).padStart(2, '0')).join('')).filter(Boolean)
+const STATELESS = ['crash', 'stall', 'set', 'base'] // records that carry no cpu, keys or screen
 const incident = r => `#${r.seq} start ${r.boot} +${Math.floor(r.second / 60)}m${r.second % 60}s ${r.kind}` +
-  (r.kind === 'base' ? ` ${r.a.toString(16).padStart(8, '0')}` : r.kind === 'set' ? ` ${r.a} installed: ${ids(r).map(id => MODULE_NAMES.get(id) ?? id).join(', ') || 'none'}` : '') +
-  (r.kind === 'freeze' ? (r.a ? ` ${(r.a * 16 / 44100).toFixed(1)} s` : ' until a restart') : r.kind === 'hot' ? ` (${r.a} half-seconds at 90 %+)` : r.kind === 'crash' ? ` pc 0x${r.a.toString(16)}` : r.kind === 'stall' ? ` reason ${r.a}` : r.kind === 'shed' ? ` ${r.a & 0xffffff} renders skipped, tracks ${[...Array(8).keys()].filter(t => r.a >>> 24 >> t & 1).map(t => t + 1).join(',')}` : '') +
-  (r.kind === 'crash' || r.kind === 'stall' ? '' : `, cpu ${percent(r.cpu)} T1-4 ${percent(r.dsp1to4)} T5-8 ${percent(r.dsp5to8)}, ${r.playing ? 'playing' : 'stopped'} at ${(r.tempo24 / 24).toFixed(1)} BPM, screen 0x${r.screen.toString(16)}` +
+  (r.kind === 'base' ? ` ${r.a.toString(16).padStart(8, '0')}` : r.kind === 'set' ? ` ${r.a} installed: ${ids(r).map(id => MODULE_NAMES.get(id) ?? id).join(', ') || 'none'}` +
+    (r.tempo24 === 0x101 ? '; all held: the last start crashed or froze' : r.screen ? `; refused ${MODULE_NAMES.get(r.screen.toString(16).padStart(8, '0')) ?? r.screen.toString(16).padStart(8, '0')} (${REFUSALS[r.tempo24] ?? 'refusal ' + r.tempo24})` : '') : '') +
+  (r.kind === 'freeze' ? (r.a ? ` ${(r.a * 16 / 44100).toFixed(1)} s` : ' until a restart') : r.kind === 'hot' ? ` (${r.a} half-seconds at 90 %+)` : r.kind === 'crash' ? ` pc 0x${r.a.toString(16)}` : r.kind === 'stall' ? ` reason ${r.a}` : r.kind === 'cpu' ? ` ${r.a & 0xffffff} machines refused for CPU, tracks ${[...Array(8).keys()].filter(t => r.a >>> 24 >> t & 1).map(t => t + 1).join(',')}` : r.kind === 'shed' ? ` ${r.a & 0xffffff} renders skipped, tracks ${[...Array(8).keys()].filter(t => r.a >>> 24 >> t & 1).map(t => t + 1).join(',')}` : '') +
+  (STATELESS.includes(r.kind) ? '' : `, cpu ${percent(r.cpu)} T1-4 ${percent(r.dsp1to4)} T5-8 ${percent(r.dsp5to8)}, ${r.playing ? 'playing' : 'stopped'} at ${(r.tempo24 / 24).toFixed(1)} BPM, screen 0x${r.screen.toString(16)}` +
     `, keys ${r.keys.filter(k => k !== 255).map(k => k.toString(16)).join(' ') || '-'}, fx ${r.fx.map(f => f.toString(16)).join(' ')}, machines ${r.machines.join(' ')}`)
 
+/** The base a log began on: its first base record (diag.c writes one after each start), else the base the site saw
+ * when it first uploaded from it (logs written before the base records). */
+const logBase = (incidents, epoch) => {
+  const mine = incidents.filter(r => r.epoch === epoch), first = mine.find(r => r.kind === 'base')
+  return first ? first.a.toString(16).padStart(8, '0') : mine[0]?.upload?.slice(0, 8) ?? 'unknown'
+}
+const PROJ = 0x1c, DOWN = 0x20, RIGHT = 0x21, YES = 0x31, UP = 0x33 // stock key codes (scripts/device.mjs)
+/** RIGHT then YES on the same row: a DOWN and an UP between them cancel, any other key or a net move breaks it. */
+const rightYes = keys => {
+  let walk = keys.map(k => k === RIGHT ? 'R' : k === YES ? 'Y' : k === UP ? 'U' : k === DOWN ? 'D' : '-').join('')
+  while (/UD|DU/.test(walk)) walk = walk.replace(/UD|DU/g, '')
+  return walk.includes('RY')
+}
+/** The stall record's report words that help triage (dsp.c modwerk_dsp_report); cpu is per mille. */
+const STALL_WORDS = ['frames', 'watchTicks', 'rejected0', 'rejected1', 'errors', 'edmaErrors', 'missed', 'setModules', 'cpu']
+const stallWords = report => STALL_WORDS.map(name => [name, report[DSP_REPORT_NAMES.indexOf(name)]]).filter(([, word]) => word !== undefined)
+  .map(([name, word]) => name + ' ' + (name === 'cpu' ? percent(word) : word)).join(', ')
+
+/** The unit's last incidents, oldest first, each log's in turn; an earlier log's name the base they ran on. A stall
+ * found at a start that runs another base than the session before is an OS upgrade (stock halts the DSPs for it while
+ * the loader may have a job open; beta finding 55), not a hang: said so. One after a session that ended stopped at
+ * 95 % CPU or more after PROJ … RIGHT YES (PROJ may have left the 16 keys the unit keeps), with the log's last set record
+ * showing none installed, is likely one too, or USB disk mode (beta finding 72): only a hint, since the base stayed the same.
+ * A freeze until a restart, stopped, in a session whose next start runs another base is the upgrade seen by diag.c's
+ * freeze watch (six of the 37 such freezes in the 16 November 2026 pull): said so. One whose base stayed is left as it is. */
+export function unitLines(incidents, names = namesFor) {
+  const all = [...incidents].map(r => ({ epoch: 0, ...r })).sort((a, b) => a.epoch - b.epoch || a.seq - b.seq)
+  const at = (r, boot = r.boot) => r.epoch + '/' + boot
+  const base = new Map(all.filter(r => r.kind === 'base').map(r => [at(r), r.a]))
+  const upgrade = r => r.kind === 'stall' && base.has(at(r)) && base.has(at(r, r.boot - 1)) && base.get(at(r)) !== base.get(at(r, r.boot - 1))
+  // The freeze twin: stock's OS upgrade stops the UI tick while the frames still run, and the record keeps the boot it happened in.
+  const upgraded = r => r.kind === 'freeze' && !r.a && !r.playing && base.has(at(r)) && base.has(at(r, r.boot + 1)) && base.get(at(r)) !== base.get(at(r, r.boot + 1))
+  const system = r => {
+    if (r.kind !== 'stall') return false
+    const last = all.findLast(p => at(p) === at(r, r.boot - 1) && !STATELESS.includes(p.kind))
+    const set = all.findLast(p => p.epoch === r.epoch && p.seq < r.seq && p.kind === 'set')
+    const keys = last?.keys.filter(k => k !== 255) ?? [], from = keys.lastIndexOf(PROJ), walk = from >= 0 ? keys.slice(from) : keys.length === 16 ? keys : []
+    return last?.cpu >= 950 && !last.playing && rightYes(walk) && set?.a === 0
+  }
+  const latest = Math.max(...all.map(r => r.epoch)), on = r => base.has(at(r)) ? base.get(at(r)).toString(16).padStart(8, '0') : logBase(all, r.epoch)
+  // A second or two at 90 % while stopped is a key press or a project load: 185 of 280 hot records from 11 to 14 November 2026 were such, 60 of them with nothing installed.
+  const brief = r => r.kind === 'hot' && r.a < 10 && !r.playing, left = all.filter(brief).length
+  return [...left ? [`  unit: ${left} hot spell${left > 1 ? 's' : ''} under 5 s while stopped left out (key presses and project loads)`] : [], ...all.filter(r => r.kind !== 'start' && !brief(r)).slice(-12).map(r => '  unit: ' + incident(r) + (r.kind === 'crash' ? withName(names(on(r)), r.a) : '') +
+    (upgrade(r) ? ' (an OS upgrade: this start runs another base; not a hang)' : upgraded(r) ? ' (an OS upgrade: the next start runs another base; not a hang)' : system(r) ? ' (likely an OS upgrade or USB disk mode, beta finding 72: the session before ended stopped at 95 %+ CPU after PROJ … RIGHT YES, no module installed)' : '') +
+    (r.epoch < latest ? ` (an earlier log, base ${on(r)})` : ''))]
+}
+
 /** The base's saved-set result (modset.c) as a reading's `saved` reports it; 1-6 are what a boot's restore found. */
-const SAVED = ['', 'RESTORED', 'nothing saved', 'skipped (FUNC held)', 'another base’s set', 'damaged', 'refused', 'saved', 'save failed', 'too big']
+const SAVED = ['', 'RESTORED', 'nothing saved', 'skipped (PROJ or FUNC held)', 'another base’s set', 'damaged', 'refused', 'saved', 'save failed', 'too big',
+  'left out after a failed start', 'held after a failed start']
 
 /** Each member's records in order: the bases, set reloads, the last finished self-test and the event counts. */
 export function members(events) {
@@ -67,14 +124,31 @@ export function members(events) {
     else if (member.connected && data.reading) {
       member.connected = false
       const { saved, savedCount, live } = data.reading, last = member.reloads.at(-1)
-      if (saved >= 1 && saved <= 6 && !(last && last.saved === saved && last.savedCount === savedCount && last.live === live))
-        member.reloads.push({ at: createdAt, saved, savedCount, live })
+      // A refused restore (6, or 10 the boot guard's) names what it dropped: the modules the site saw before, missing now.
+      const missing = (saved === 6 || saved === 10) && data.modules?.length && member.modules ? member.modules.filter(id => !data.modules.some(m => m.id === id)) : []
+      if ((saved >= 1 && saved <= 6 || saved === 10 || saved === 11) && !(last && last.saved === saved && last.savedCount === savedCount && last.live === live))
+        member.reloads.push({ at: createdAt, saved, savedCount, live, missing })
     }
+    if (data.modules?.length) member.modules = data.modules.map(m => m.id)
     if (data.event === 'load' && data.live) member.live = { ...data.live, at: createdAt }
-    // The unit's log arrives in pieces and can arrive twice: keep each record once, by its start and seq.
-    for (const r of data.log?.incidents ?? []) (member.incidents ??= new Map()).set(r.boot + '/' + r.seq, r)
-    for (const r of data.log?.loads ?? []) (member.loads ??= new Map()).set(r.boot + '/' + r.seq, r)
-    if (data.log?.crash) member.crash = data.log.crash
+    // The unit's log arrives in pieces and can arrive twice: keep each record once, by its log and seq. A base that
+    // brings a new log restarts it at start 1, seq 1 (diag.c), and the site uploads each log in rising seqs, so a
+    // piece holding a seq this log has with other content, or a new one below its highest, is the next log's.
+    // shortcut: a piece lost in upload and sent again later by another browser also opens a log; upload a hash of the log's nonce if that shows.
+    for (const kind of ['incidents', 'loads']) {
+      const records = data.log?.[kind] ?? []
+      if (!records.length) continue
+      const log = (member.logs ??= {})[kind] ??= { epoch: 0, seen: new Map(), last: 0 }, kept = member[kind] ??= new Map()
+      const same = r => JSON.stringify([r.boot, r.kind, r.second ?? r.minute, r.a, r.cpu])
+      if (records.some(r => log.seen.has(r.seq) ? log.seen.get(r.seq) !== same(r) : r.seq < log.last)) Object.assign(log, { epoch: log.epoch + 1, seen: new Map(), last: 0 })
+      for (const r of records) {
+        log.seen.set(r.seq, same(r))
+        log.last = Math.max(log.last, r.seq)
+        // `upload`: the base the site saw, for logs written before the base records.
+        kept.set(log.epoch + '/' + r.seq, { ...r, epoch: log.epoch, upload: data.base })
+      }
+    }
+    if (data.log?.crash) Object.assign(member, { crash: data.log.crash, crashBase: data.base }) // the base that sent it: a crash restarts on the same one
     if (data.log?.stall) member.stall = data.log.stall
     if (data.event === 'selftest' && data.reading?.state >= 2) {
       member.selftest = data.reading
@@ -96,13 +170,17 @@ export function reportsByMember(issues) {
   return found
 }
 
-/** Restarts as the unit's own log counts them: each start after the first it still holds. */
+/** Restarts as the unit's own log counts them: each start after the first it still holds, per log. */
 function restarts(member) {
-  const boots = [...member.incidents?.values() ?? []].filter(r => r.kind === 'start').map(r => r.boot).sort((a, b) => a - b)
-  return boots.length > 1 ? [`  restarts ${boots.length - 1} (the unit's log, starts ${boots[0]}-${boots.at(-1)})`] : []
+  const incidents = [...member.incidents?.values() ?? []], latest = Math.max(0, ...incidents.map(r => r.epoch))
+  return [...Map.groupBy(incidents.filter(r => r.kind === 'start'), r => r.epoch)].sort(([a], [b]) => a - b).flatMap(([epoch, starts]) => {
+    const boots = starts.map(r => r.boot).sort((a, b) => a - b)
+    return boots.length > 1 ? [`  restarts ${boots.length - 1} (the unit's ${epoch < latest ? 'earlier ' : ''}log` +
+      (latest ? ', from base ' + logBase(incidents, epoch) : '') + `, starts ${boots[0]}-${boots.at(-1)})`] : []
+  })
 }
 
-export function summary({ events, counts }, { base = '', reports = new Map() } = {}) {
+export function summary({ events, counts }, { base = '', layouts = {}, reports = new Map(), names = namesFor } = {}) {
   const found = members(events)
   // The configuration page checks the card build on every module change: a refused selection is not a failure.
   const selection = ({ data }) => data.event === 'build_failed' && data.error === 'selection'
@@ -110,22 +188,27 @@ export function summary({ events, counts }, { base = '', reports = new Map() } =
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   const checks = Object.entries(Object.groupBy(events.filter(selection), entry => entry.username)).sort((a, b) => b[1].length - a[1].length)
   const days = Map.groupBy(counts, row => row.day)
-  const baseName = hash => hash.slice(0, 8) + (!base ? '' : hash === base ? ' (the site’s current base)' : ' (older than the site’s ' + base.slice(0, 8) + ')')
+  // A unit on another output layout of the current base (base-binding.json's variants) runs the current base too.
+  const layout = hash => Object.keys(layouts).find(name => layouts[name] === hash)
+  const baseName = hash => hash.slice(0, 8) + (!base ? '' : hash === base ? ' (the site’s current base)' : layout(hash) ? ` (the site’s current base, ${layout(hash)} layout)` : ' (older than the site’s ' + base.slice(0, 8) + ')')
   return [
     `${events.length} records from ${found.size} members (last 30 days; times are this computer's)`,
     ...[...found].sort((a, b) => b[1].last.localeCompare(a[1].last)).flatMap(([name, member]) => [
       '', `@${name}  last ${when(member.last)}` + (member.bases.length ? '  base ' + member.bases.map(baseName).join(' → ') : ''),
       ...(reports.get(name) ?? []).map(issue => `  report #${issue.number} ${issue.state.toLowerCase()}: ${issue.title}`),
       ...restarts(member),
-      ...member.reloads.length ? ['  set reloads at boot: ' + member.reloads.map(r => `${when(r.at)} ${SAVED[r.saved]}` + (r.saved === 1 ? ` ${r.live}/${r.savedCount}` : '')).join(', ')] : [],
+      ...member.reloads.length ? ['  set reloads at boot: ' + member.reloads.map(r => `${when(r.at)} ${SAVED[r.saved]}` + (r.saved === 1 ? ` ${r.live}/${r.savedCount}` : '') + (r.missing?.length ? ` (missing ${r.missing.join(', ')})` : '')).join(', ')] : [],
       ...member.selftest ? [`  last self-test ${member.selftest.state === 2 ? 'passed' : 'failed (bits ' + member.selftest.failed + ')'}` + (member.selftest.ran ? '' : ', no DSP module ran')] : [],
       ...member.peak ? [`  highest self-test peaks ${when(member.peak.at)}: CPU ${percent(member.peak.cpu)}, DSP T1-4 ${percent(member.peak.tracks1to4)}, T5-8 ${percent(member.peak.tracks5to8)}`] : [],
       ...member.live ? [`  live load ${when(member.live.at)}: CPU ${member.live.cpu?.map(percent).join(' mean, ') ?? '-'} peak, T1-4 ${member.live.dsp1to4?.map(percent).join('/') ?? '-'}, T5-8 ${member.live.dsp5to8?.map(percent).join('/') ?? '-'} (${member.live.samples} readings)`] : [],
       ...member.loads?.size ? [`  unit's load log: ${member.loads.size} five-minute records, CPU peak ${percent(Math.max(...[...member.loads.values()].map(r => r.cpu[1])))}, mean ${percent([...member.loads.values()].reduce((a, r) => a + r.cpu[0], 0) / member.loads.size)}`] : [],
       ...(member.loads && [...member.loads.values()].some(r => r.frameGap !== undefined) ? [`  longest frame gap ${Math.max(...[...member.loads.values()].map(r => r.frameGap ?? 0))} us (frames are 363, DSPs starve past about 515), longest UI-tick gap ${Math.max(...[...member.loads.values()].map(r => r.tickGap ?? 0))} frames (freeze at 13,781)`] : []),
-      ...member.crash ? [`  crash record ${member.crash.count}: vector ${member.crash.vector} pc 0x${member.crash.pc.toString(16)} code ${member.crash.code.map(w => w.toString(16).padStart(8, '0')).join(' ')} uncached ${member.crash.memory.map(w => w.toString(16).padStart(8, '0')).join(' ')}`] : [],
-      ...member.stall ? [`  stall record ${member.stall.count}: reason ${member.stall.reason} (1 frames stopped, 2 eDMA refused) at tick ${member.stall.ticks}`] : [],
-      ...[...member.incidents?.values() ?? []].filter(r => r.kind !== 'start').sort((a, b) => a.boot - b.boot || a.seq - b.seq).slice(-12).map(r => '  unit: ' + incident(r)),
+      ...member.crash ? [`  crash record ${member.crash.count}: vector ${member.crash.vector} pc 0x${member.crash.pc.toString(16)} code ${member.crash.code.map(w => w.toString(16).padStart(8, '0')).join(' ')} uncached ${member.crash.memory.map(w => w.toString(16).padStart(8, '0')).join(' ')}`,
+        ...[crashNames(names(member.crashBase), member.crash.pc, member.crash.stack ?? [])].filter(Boolean).map(line => '    ' + line)] : [],
+      ...member.stall ? [`  stall record ${member.stall.count}: reason ${member.stall.reason} (1 frames stopped, 2 eDMA refused) at tick ${member.stall.ticks}`,
+        ...member.stall.report?.length ? ['    report: ' + stallWords(member.stall.report)] : [],
+        ...[describeStallFrames(member.stall.frames, member.stall)].filter(Boolean).map(line => '    ' + line)] : [],
+      ...unitLines([...member.incidents?.values() ?? []], names),
       '  ' + Object.entries(member.kinds).map(([kind, n]) => kind + ' ' + n).join(', '),
     ]),
     '', 'Self-test peaks are measured only while DSP modules run. Live load comes from the site while connected; the unit\'s log covers the time without it. Screen codes are stock input layers, keys stock key codes.',
@@ -172,13 +255,13 @@ async function main() {
   let binding
   try { binding = execFileSync('git', ['show', 'origin/main:sdk/machines/octatrack/base-binding.json'], { cwd: fileURLToPath(ROOT), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) }
   catch { binding = readFileSync(new URL('sdk/machines/octatrack/base-binding.json', ROOT), 'utf8') }
-  const base = JSON.parse(binding).identity
+  const { identity: base, variants: layouts } = JSON.parse(binding)
   let reports = new Map(), note = ''
   try {
     reports = reportsByMember(JSON.parse(execFileSync('gh', ['issue', 'list', '--label', 'issue-report', '--state', 'all', '--limit', '300',
       '--search', 'created:>=' + from.slice(0, 10), '--json', 'number,title,state,body'], { cwd: fileURLToPath(ROOT), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })))
   } catch (error) { note = '\n\nGitHub reports not matched: ' + (error.stderr?.toString().trim() || error.message) }
-  console.log(summary(data, { base, reports }) + note + '\n\nEvery record: ' + file)
+  console.log(summary(data, { base, layouts, reports }) + note + '\n\nEvery record: ' + file)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -42,14 +42,23 @@ class ResidentStockDsp(unittest.TestCase):
             self.assertTrue(resident.buffer_fits(tag, 2, block, 0x3da2, resident.SIDECHAIN))  # stock DARK's actual high water
             self.assertFalse(resident.buffer_fits(tag, 2, block, 0x3dff, resident.SIDECHAIN))
             self.assertFalse(resident.buffer_fits(tag, 2, block, 16384, resident.SIDECHAIN))
-            self.assertTrue(resident.buffer_fits(tag, 2, 0x4000, 16384, resident.SIDECHAIN))
+            # The first internal slot's tail is the key bus (Y $7e00..$7fff): a +$3DFD ring and BBD's 0x203A fit, a whole
+            # slot does not; the second internal slot is whole.
+            self.assertFalse(resident.buffer_fits(tag, 2, 0x4000, 16384, resident.SIDECHAIN))
+            self.assertFalse(resident.buffer_fits(tag, 2, 0x4000, 16384, resident.KEYBUS))
+            self.assertTrue(resident.buffer_fits(tag, 2, 0x4000, 16384, 0))
+            self.assertTrue(resident.buffer_fits(tag, 2, 0x4000, 0x3dfe, resident.SIDECHAIN | resident.KEYBUS))
+            self.assertTrue(resident.buffer_fits(tag, 2, 0x4000, 0x203a, resident.SIDECHAIN | resident.KEYBUS))
+            self.assertTrue(resident.buffer_fits(tag, 2, 0x4000, 0x3e00, resident.KEYBUS))
+            self.assertFalse(resident.buffer_fits(tag, 2, 0x4000, 0x3e01, resident.KEYBUS))
+            self.assertTrue(resident.buffer_fits(tag, 2, 0x8000, 16384, resident.SIDECHAIN | resident.KEYBUS))
             self.assertTrue(resident.buffer_fits(tag, 1, 0x1000, 3072, resident.SIDECHAIN))
         self.assertFalse(resident.buffer_fits('B', 2, 0x38000, 1, resident.MATRIX))
         self.assertFalse(resident.buffer_fits('A', 2, 0x30001, 4, 0))
 
     def test_reviewed_resident_changes_fail_closed(self):
         # The Sidechain key phase change (resident_dsp.REVIEWED): exact old text once, the exact reviewed result.
-        name, asm = 'sidechain-compressor', 'modules/sidechain-compressor/upstream/tools/patch_sc_dsp3.asm'
+        name, asm = 'sidechain-compressor', 'modules/sidechain-compressor/patch_sc_dsp3.asm'
         text = (ROOT / 'sdk/octabam' / asm).read_text()
         pinned, changes, result, markers = resident.REVIEWED[name]
         self.assertEqual(pinned, resident.SOURCES[asm])
@@ -99,18 +108,23 @@ class ResidentStockDsp(unittest.TestCase):
                     self.assertEqual(moved['operand'] - row['operand'], 0x400)
                     self.assertEqual(moved['onValue'], row['onValue'])
                     self.assertEqual(first['words'][row['operand'] - first['origin']], row['offValue'])
-                # Complete dormant replays: SCdet displaces TWO one-word moves.
-                for row, label in zip(first['guards'][:3], ('hsc_tap_off', 'hsc_det_off', 'hsc_commit_off')):
+                # Complete dormant replays: SCdet displaces TWO one-word moves, SCinit one two-word move.
+                for row, label in zip(first['guards'][:4], ('hsc_tap_off', 'hsc_det_off', 'hsc_commit_off', 'hsc_init_off')):
                     at = first['labels'][label] - first['origin']
                     self.assertEqual(hashlib.sha256(b''.join(w.to_bytes(3, 'big') for w in first['words'][at:at + 2])).hexdigest(), row['expectedSha256'])
                 prefix_at = first['labels']['hsc_det_off'] - first['origin']
                 prefix = first['words'][prefix_at:prefix_at + 2]
-                stock = dict(key='COMPRESSOR', proc=2, relocations=[0, 3, 6])
-                updated, words = resident.compressor_bridge(stock, [0, 0] + prefix + [0, 0, 0], first)
-                self.assertEqual(updated['relocations'], [0, 6])
+                init_at = first['labels']['hsc_init_off'] - first['origin']
+                init = first['words'][init_at:init_at + 2]
+                stock = dict(key='COMPRESSOR', proc=2, init=5, relocations=[0, 3, 5, 6, 7])
+                updated, words = resident.compressor_bridge(stock, [0, 0] + prefix + [0] + init + [0], first)
+                self.assertEqual(updated['relocations'], [0, 7])
                 self.assertEqual(words[3], first['labels']['hsc_det'])
+                self.assertEqual(words[6], first['labels']['hsc_init'])
                 with self.assertRaises(ValueError):
-                    resident.compressor_bridge(stock, [0] * 7, first)
+                    resident.compressor_bridge(stock, [0] * 8, first)
+                with self.assertRaises(ValueError):
+                    resident.compressor_bridge(stock, [0, 0] + prefix + [0, 0, 0, 0], first)
                 control = resident.receiver_control(first)
                 text = loader.receiver_source(loader.RECEIVER.read_text(), (0x7c8, 0x7c9), 1200,
                                               tag=tag, ids=128, hook_control=control,

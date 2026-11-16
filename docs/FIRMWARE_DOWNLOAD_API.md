@@ -10,8 +10,10 @@ The site emits `firmware-builder.json`, a fingerprint of the engine, catalogue,
 build policies and dependency lock. The tool rejects a different local builder,
 unpublished/paused/beta modules, incompatible selections, a stock OS mismatch,
 changed live inputs during a build, and unexpected release or image hashes.
-Digitakt II downloads remain disabled. Octatrack, Digitakt mk1 and Digitone
-mk1/Keys use their existing builders and stock verification.
+Digitakt II downloads remain disabled. Digitakt mk1 and Digitone mk1/Keys use
+their existing builders and stock verification. The Octatrack has no firmware
+build with modules in it: its modules go through the Modwerk base, over USB or
+as the module file for the card.
 
 This verifies a **saved local build from published inputs**. It does not test
 browser controls, account/download tracking, physical flashing or hardware
@@ -49,10 +51,7 @@ npm run firmware:download -- \
   --request /tmp/digi-download.json
 ```
 
-For Octatrack, set `machine` to `octatrack`, `os` to `1.40C`, choose native
-module IDs, and omit `version` (the published display version is ELEKLOADER).
-Optional `keepStockFx2` and `usbAudio` settings use the browser engine's existing
-validation. For Digitone, use `digitone`, its supported stock OS, native module
+For Digitone, use `digitone`, its supported stock OS, native module
 IDs and a four-character ASCII display version.
 
 Every success creates a fresh private output folder, saves the firmware and
@@ -61,6 +60,35 @@ are never overwritten. JSON output and `download-receipt.json` identify the
 stock hash, deployed builder fingerprint, inventory hash, exact module
 versions, source pins, saved paths and SHA-256. A failed save removes its
 incomplete output folder. Keep these stock-derived sidecars private too.
+
+## After a release that rebuilt modules
+
+When a merge changes module source, the release compiles the packages again
+and imports them with its approval record, so a plain checkout of the merge
+commit reports "Local builder differs from the deployed builder". Reproduce
+that import in a scratch worktree at the merge commit, then build:
+
+```sh
+gh run download <release run id> -n octamod-source-<merge sha> -D <dir>
+GITHUB_REPOSITORY=repeat98/modwerk GITHUB_TOKEN=$(gh auth token) \
+  OCTAMOD_APPROVER_ID=$(gh api users/repeat98 -q .id) \
+  node scripts/import-module-build.mjs <dir>
+npm run prepare
+```
+
+The local fingerprint then equals the deployed `firmware-builder.json`.
+
+A release whose `source-packages` job was skipped (no Octatrack module source
+changed, for example a Digitakt module update) stamps its approval into
+`src/engine/assets/module-build.json` instead, which the fingerprint covers too.
+At the merge commit, run the same stamp:
+
+```sh
+npm run prepare
+GITHUB_REPOSITORY=repeat98/modwerk GITHUB_TOKEN=$(gh auth token) \
+  OCTAMOD_APPROVER_ID=$(gh api users/repeat98 -q .id) \
+  node scripts/stamp-module-build.mjs
+```
 
 ## HTTP API
 

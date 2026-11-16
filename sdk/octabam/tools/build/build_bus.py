@@ -160,7 +160,8 @@ if not (BUILD_TAG.isdigit() and 1 <= len(BUILD_TAG) <= 2):
 # bare synonyms for "no effect". 0x06 is the exact id tools/build/build_dspprobe.py
 # proved runs custom DSP code on real hardware. schema.py enforces the range.
 from remix.machine_composition import compose_map
-_MODS = compose_map(remix_modules(), REMIX.modules)
+from runtime_join import join_map
+_MODS = join_map(compose_map(remix_modules(), REMIX.modules), REMIX.modules)
 remix_modules = lambda: _MODS
 _SEL = [_MODS[k] for k in CARRIED]
 # A STOCK row (tools/remix/stock.py) gets no clone, no code and no words:
@@ -243,6 +244,28 @@ def plain_slots(m) -> tuple[int, ...]:
     (scripts/build-module-packages.py, export-resident-dsp.py) call this too."""
     return tuple(i for i, p in enumerate(m.params)
                  if p.formatter is Formatter.PLAIN and p.active is not False)
+
+
+def _dram_rom_externals(dram, unit_defs, exports, taken):
+    """dram_rom_refs.rom_externals over the DRAM units, each assembled as remix.platform_build.link_runtime
+    assembles it (cached), so these are the symbol tables that link sees."""
+    from remix.compile_cache import assemble_coldfire
+    from remix.platform_build import ROOT as _proot, promote_symbols
+    from dram_rom_refs import rom_externals
+    work = pathlib.Path("out/platform/rom-refs").resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    objects = []
+    for i, (_m, u) in enumerate(dram):
+        obj, inc = work / f"{i:02d}_{u.label}.o", None
+        if u.include is not None:
+            inc = work / f"{i:02d}_{u.label}.inc"
+            inc.mkdir(exist_ok=True)
+            (inc / "remix.inc").write_text(u.include({_k: remix_modules()[_k] for _k in REMIX.modules}))
+        assemble_coldfire(_proot / u.source, '54455', obj, incdir=str(inc) if inc else None, cwd=work,
+                          defsyms=tuple(unit_defs.get(u.label, ())))
+        promote_symbols(obj, u.exports)
+        objects.append(obj)
+    return rom_externals(objects, exports, taken)
 
 
 def floating_cave_at(cave_top: int, ovf_top: int, need: int, cave_limit: int) -> int | None:
@@ -1401,17 +1424,6 @@ def main():
         if _inside:
             _cave_top = _c.cave_addr + _used
 
-    for name in CLONED_ORDER:
-        for slot, param in enumerate(_MODS[name].params):
-            for array, value in zip((0x0ca,0x0fa,0x12a), param.raw_words):
-                if value is None: continue
-                if isinstance(value,tuple):
-                    unit,symbol=value
-                    if unit not in _sym or symbol not in _sym[unit]:
-                        sys.exit(f"{name}: unresolved descriptor {unit}:{symbol}")
-                    value=_sym[unit][symbol]
-                wr32(clone_addr[name]+array+slot*4,value)
-
     # ==== 1c. loader-appended DRAM runtimes (schema.Runtime) =================
     # The third placement class: the OS image GROWS by an append (early
     # loader + stage + packed runtime) and the runtime executes from DRAM.
@@ -1553,6 +1565,14 @@ def main():
         _unit_defs[_u.label] = _mine
     _pdefs = dict(_dram_defs)
     _pdefs.update(_defsym_ovr)
+    # A DRAM unit's reference that no DRAM unit, payload or DRAM region defines resolves from the ROM
+    # units' global symbols (_exports), as a ROM unit's references do above. The configurator follows
+    # the same rule (src/engine/coldfire-runtime.ts, romExternals): a module's DRAM code can read a
+    # byte its own ROM unit owns. A build that worked before has no such reference: ld refused it.
+    if _dram:
+        _pdefs.update(_dram_rom_externals(_dram, _unit_defs, _exports, set(_pdefs)
+            | {k for _p in _payloads for k in _p.get("symbols", {})}
+            | {r.symbol for k in REMIX.modules for r in remix_modules()[k].dram_regions}))
 
     if _dram or _payloads:
         from remix import platform_build
@@ -1606,6 +1626,19 @@ def main():
               if _reserve else
               f"  platform loader: payloads {', '.join(_pnames)}, "
               f"append {len(_pappend):,} B at 0x{platform_build.LOADER_AT:08x}")
+
+    # Raw descriptor words (a stock-DSP module's own formatters and widgets) resolve after the
+    # platform runtime is linked, so a unit that joined the DRAM runtime is named like a ROM one.
+    for name in CLONED_ORDER:
+        for slot, param in enumerate(_MODS[name].params):
+            for array, value in zip((0x0ca,0x0fa,0x12a), param.raw_words):
+                if value is None: continue
+                if isinstance(value,tuple):
+                    unit,symbol=value
+                    if unit not in _sym or symbol not in _sym[unit]:
+                        sys.exit(f"{name}: unresolved descriptor {unit}:{symbol}")
+                    value=_sym[unit][symbol]
+                wr32(clone_addr[name]+array+slot*4,value)
 
     for _m, _t in [(remix_modules()[_k], _t) for _k in REMIX.modules
                    for _t in getattr(remix_modules()[_k], "tables", ())]:
@@ -2902,6 +2935,7 @@ hostquit:
         # once and compare them.
         LFO01_MARK = "LFO lines 0-1: ROLLED TOO"
         PTABLE_MARK = "$fab1e0"          # schema.DspSection.ptable's literal
+        PTABLE2_MARK = "$fab2e0"         # schema.DspSection.ptable2's, straight after the ptable
 
         # ---- XTABLE: the P tables go to the stock curve bank ------------
         _xt_base, _xt_words = stock_mod.CURVE_BANK
@@ -2948,7 +2982,7 @@ hostquit:
                 # first, and each literal is rewritten to its own start.
                 _n = ((len(LFO01 + LFOTAB) if LFO01_MARK in _t else len(LFOTAB))
                       if "$facade" in _t else 0) \
-                    + (len(_MODS[_k].dsp.ptable) if PTABLE_MARK in _t else 0)
+                    + (len(_MODS[_k].dsp.ptable) + len(_MODS[_k].dsp.ptable2) if PTABLE_MARK in _t else 0)
                 _xt_layout[_k] = (_xa, _n)
                 _xa += _n
             if _xa > _xt_base + _xt_words:
@@ -2990,6 +3024,17 @@ hostquit:
                 sys.exit(f"payload {tag}: {name} has multiple $facade "
                          f"LFOTAB literals -- expected exactly one")
             _ptab = list(remix_modules()[name].dsp.ptable) if name in remix_modules() else []
+            _ptab2 = list(remix_modules()[name].dsp.ptable2) if name in remix_modules() else []
+            if bool(_ptab2) != (PTABLE2_MARK in src) or src.count(PTABLE2_MARK) > 1:
+                sys.exit(f"payload {tag}: {name}: a DspSection.ptable2 and exactly one "
+                         f"{PTABLE2_MARK} literal in the source go together "
+                         f"(table {len(_ptab2)} words, literal x{src.count(PTABLE2_MARK)})")
+
+            def _ptsub(text, at, _n=len(_ptab), _two=bool(_ptab2)):
+                # The ptable at `at`; the ptable2, when there is one, straight after it.
+                text = text.replace(PTABLE_MARK, f"${at:x}")
+                return text.replace(PTABLE2_MARK, f"${at + _n:x}") if _two else text
+            _ptab = _ptab + _ptab2
             _arena = remix_modules()[name].dsp.arena if name in remix_modules() else ""
             if _arena:
                 # Placed last, it takes the rest of the first run that holds
@@ -3002,7 +3047,7 @@ hostquit:
                                        for _v in _rc.MODULE_PACKAGES.values()])
                 for _r in runs:
                     _c, _end = _r["cursor"], _r["base"] + _r["words"]
-                    _probe = src.replace(f"@{_arena}@", "0").replace(PTABLE_MARK, f"${_c:x}")
+                    _probe = _ptsub(src.replace(f"@{_arena}@", "0"), _c)
                     _n = _end - _c - len(assemble_syms(_probe, _c, label=name)[0])
                     if _n >= max(_amin, 1):
                         break
@@ -3055,7 +3100,7 @@ hostquit:
                 _xa, _at, _lead = _xt_layout.get(name), DEV_DELAY_P, []
                 if _ptab and _xa is not None:
                     src, _xt_sites[name] = _p2x(
-                        src.replace(PTABLE_MARK, f"${_xa[0]:x}"), name)
+                        _ptsub(src, _xa[0]), name)
                     if len(_ptab) != _xa[1]:
                         sys.exit(f"payload {tag}: {name}'s table is "
                                  f"{len(_ptab)} words, its X slot {_xa[1]}")
@@ -3064,7 +3109,7 @@ hostquit:
                           f"({len(_ptab):4d} words)  {name}'s table  in the stock "
                           f"curve bank, {_xt_sites[name]} p:( reads -> x:(")
                 elif _ptab:
-                    src = src.replace(PTABLE_MARK, f"${DEV_DELAY_P:x}")
+                    src = _ptsub(src, DEV_DELAY_P)
                     _at, _lead = DEV_DELAY_P + len(_ptab), list(_ptab)
                     print(f"  {'PTABLE':13} P:0x{DEV_DELAY_P:05x}..0x{_at:05x} "
                           f"({len(_ptab):4d} words)  {name}'s table  (DEV: leads "
@@ -3113,7 +3158,7 @@ hostquit:
                     if _lfo:
                         _s2 = _s2.replace("$facade", f"${_at:x}")
                     if _ptab:
-                        _s2 = _s2.replace(PTABLE_MARK, f"${_at + len(_ltab):x}")
+                        _s2 = _ptsub(_s2, _at + len(_ltab))
                     if _xa is not None:
                         _s2, _xt_sites[name] = _p2x(_s2, name)
                     else:
@@ -3136,7 +3181,7 @@ hostquit:
                     _code_runs = sorted(runs, key=lambda r: (r["base"] + r["words"] - r["cursor"] - (len(_ptab) if r is _tr else 0), r["base"])) if "ANALOG BD" in REMIX.modules and not DYNAMIC else runs
                     for _cr in _code_runs:
                         _ca = _cr["cursor"] + (len(_ptab) if _cr is _tr else 0)
-                        _s2 = src.replace(PTABLE_MARK, f"${_ta:x}")
+                        _s2 = _ptsub(src, _ta)
                         _w, _syms = assemble_syms(_s2, _ca, label=name)
                         if _ca + len(_w) <= _cr["base"] + _cr["words"]:
                             _split_table = (_tr, _ta, list(_ptab))

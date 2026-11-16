@@ -202,7 +202,9 @@ class UsbBaseTests(unittest.TestCase):
         import struct, uuid
         dev, bos, ms = self.usb.device(), self.usb.bos(), self.usb.msos20()
         self.assertEqual(dev[2:4], b'\x10\x02')  # USB 2.10: Windows reads BOS
-        self.assertEqual(dev[:2] + dev[4:], self.usb.STOCK_DEVICE[:2] + self.usb.STOCK_DEVICE[4:])
+        self.assertEqual(dev[12:14], struct.pack('<H', self.usb.BASE_REVISION))  # bcdDevice: never stock's
+        self.assertNotEqual(dev[12:14], self.usb.STOCK_DEVICE[12:14])
+        self.assertEqual(dev[:2] + dev[4:12] + dev[14:], self.usb.STOCK_DEVICE[:2] + self.usb.STOCK_DEVICE[4:12] + self.usb.STOCK_DEVICE[14:])
         self.assertEqual(bos[:5], bytes([5, 0x0f, len(bos), 0, 1]))
         self.assertEqual(bos[9:25], uuid.UUID('D8DD60DF-4589-4CC7-9CD2-659D9E648A9F').bytes_le)
         self.assertEqual(struct.unpack('<IHBB', bos[25:33]), (0x06030000, len(ms), self.usb.MS_VENDOR_CODE, 0))
@@ -338,6 +340,29 @@ class RuntimeSlotTests(unittest.TestCase):
             result = subprocess.run([temp + '/t'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_window_half_keeps_wide_buffers_out_of_block_3_on_the_host(self):
+        """build_core.py's edits to Octabam's buffer planner, applied to copies, with test_window_buffers.c."""
+        import importlib.util, pathlib, shutil, subprocess, tempfile
+        cc = shutil.which('cc')
+        if not cc:
+            self.skipTest('no host C compiler')
+        here = pathlib.Path(__file__).resolve().parent
+        transport = here.parents[2] / 'octabam/platform/dsp-dynload-transport'
+        spec = importlib.util.spec_from_file_location('build_core_for_test', here / 'build_core.py')
+        build_core = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build_core)
+        with tempfile.TemporaryDirectory() as temp:
+            for name in ('buffers.c', 'buffers.h'):
+                text = (transport / name).read_text()
+                for old, new in build_core.DSP_EDITS.get(name, ()) + build_core.WIDTH_EDITS.get(name, ()):
+                    self.assertEqual(text.count(old), 1, name)
+                    text = text.replace(old, new)
+                (pathlib.Path(temp) / name).write_text(text)
+            subprocess.run([cc, '-std=c99', '-Wall', '-Wextra', '-Werror', '-DMODWERK_FX_IDS=128u', '-I', temp, '-I', here,
+                            temp + '/buffers.c', here / 'test_window_buffers.c', '-o', temp + '/t'], check=True, capture_output=True)
+            result = subprocess.run([temp + '/t'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_dsp_packages_rebuild_from_source(self):
         """dsp_packages.py rebuilds the catalogue's DSP effects byte for byte on the Elekloader path."""
         import os, pathlib, subprocess, sys
@@ -379,6 +404,20 @@ class DspLoaderTests(unittest.TestCase):
         self.assertEqual(text.count('#>2384'), 4)  # WRITE, its read-back, SUM, the table
         with self.assertRaisesRegex(ValueError, 'receiver changed'):
             dsp_loader.receiver_source(dsp_loader.RECEIVER.read_text().replace('@NULL_PROC@', '$0'), (0x7c8, 0x7c9), 1)
+
+    def test_receiver_runs_its_packet_operations_from_the_window(self):
+        import dsp_loader
+        private, window = dsp_loader.split_receiver(dsp_loader.receiver_source(dsp_loader.RECEIVER.read_text(), (0x7c8, 0x7c9), 2384))
+        # Every frame runs the private half; the window half only on a frame with a packet (twice the cycles a word).
+        for label in ('frame:', 'tallied:', 'accepted:', 'finish:', 'c1wait:', 'tablebase:', 'missoffset:', 'dltable:'):
+            self.assertEqual(private.count(label), 1, label)
+        for label in ('coldops:', 'upload:', 'binding:', 'badsum:', 'keeprecord:', 'accepted:', 'finish:'):
+            self.assertEqual(window.count(label), 1, label)
+        self.assertNotIn('tablebase', window)  # a bsr back into private P: dsp_asm cannot branch backwards
+        self.assertNotIn('upload:', private)
+        for base in dsp_loader.WINDOW.values():
+            self.assertEqual(base & 0x3fff, dsp_loader.WINDOW_TAIL)
+            self.assertLessEqual((base & 0x3fff) + dsp_loader.WINDOW_WORDS, 0x4000)
 
     def test_a_stock_package_relocates_as_the_loader_places_it(self):
         from dsp_loader import relocated

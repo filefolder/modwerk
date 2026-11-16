@@ -145,7 +145,7 @@
    "index": 28,
    "event": "ot_machines",
    "kind": "table",
-   "room": 4,
+   "room": 8,
    "record": 80
   },
   {
@@ -164,8 +164,122 @@
    "index": 31,
    "event": "ot_midi_generators",
    "kind": "table",
-   "room": 4,
+   "room": 16,
    "record": 36
+  },
+  {
+   "index": 32,
+   "event": "ev_midi_note_key",
+   "kind": "take",
+   "room": 8
+  },
+  {
+   "index": 33,
+   "event": "ev_arp_setup_knob",
+   "kind": "take",
+   "room": 8
+  },
+  {
+   "index": 34,
+   "event": "ev_arp_setup_text",
+   "kind": "take",
+   "room": 8
+  },
+  {
+   "index": 35,
+   "event": "ev_trig_muted",
+   "kind": "raise"
+  },
+  {
+   "index": 36,
+   "event": "ot_sample_editor_actions",
+   "kind": "table",
+   "room": 4,
+   "record": 64
+  },
+  {
+   "index": 37,
+   "event": "ot_machine_starts",
+   "kind": "table",
+   "room": 8,
+   "record": 16
+  },
+  {
+   "index": 38,
+   "event": "ev_banks_load",
+   "kind": "call"
+  },
+  {
+   "index": 39,
+   "event": "ev_banks_loaded",
+   "kind": "raise"
+  },
+  {
+   "index": 40,
+   "event": "ev_bank_load",
+   "kind": "call"
+  },
+  {
+   "index": 41,
+   "event": "ev_bank_loaded",
+   "kind": "raise"
+  },
+  {
+   "index": 42,
+   "event": "ev_project_new",
+   "kind": "call"
+  },
+  {
+   "index": 43,
+   "event": "ev_bank_write",
+   "kind": "call"
+  },
+  {
+   "index": 44,
+   "event": "ev_bank_written",
+   "kind": "raise"
+  },
+  {
+   "index": 45,
+   "event": "ev_project_store",
+   "kind": "call"
+  },
+  {
+   "index": 46,
+   "event": "ev_project_stored",
+   "kind": "raise"
+  },
+  {
+   "index": 47,
+   "event": "ev_project_reload",
+   "kind": "call"
+  },
+  {
+   "index": 48,
+   "event": "ev_project_reloaded",
+   "kind": "raise"
+  },
+  {
+   "index": 49,
+   "event": "ev_part_saved",
+   "kind": "call"
+  },
+  {
+   "index": 50,
+   "event": "ev_part_clear",
+   "kind": "call"
+  },
+  {
+   "index": 51,
+   "event": "ev_modules_ready",
+   "kind": "raise"
+  },
+  {
+   "index": 52,
+   "event": "ot_sample_memory",
+   "kind": "table",
+   "room": 1,
+   "record": 16
   }
  ]
 }

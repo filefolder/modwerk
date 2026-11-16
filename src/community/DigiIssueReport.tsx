@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { post } from './api'
 import { useCommunity } from './context'
 import { MemberPrompt } from './MemberPrompt'
-import { FLASH_STATES, type DigiIssueContext, type FlashState } from './issue-context'
+import { DIGI_FLASH_CHOICES, FLASH_STATES, type DigiIssueContext, type FlashState } from './issue-context'
 import { useWorkspaceReportContext, type WorkspaceReportContext } from './report-context'
 import { communityModule } from './modules'
 import { DEVICES_BY_ID } from '../devices/registry'
-import { BetaReportReminder, BugReportNotice, BugReportSuccess, ExistingIssues } from './BugReportNotice'
+import { AuthorExpectations, BugReportNotice, BugReportSuccess, ExistingIssues } from './BugReportNotice'
 import { ReportNotifications } from './ReportNotifications'
 import { refreshModuleIssues, useIssueTracker, type BugReportResult } from './issue-tracker'
 import { useOpenIssueReport } from './useOpenIssueReport'
@@ -32,7 +32,7 @@ export function DigiIssueReport({ id, openRequest = 0, embedded = false, workspa
   const deviceFields = <div className="issue-report-row issue-report-row-3">
     <label>{device.name}<select name="model" defaultValue={kept.model} required><option value="" disabled>Choose…</option>{(device.variants ?? [device.name]).map(model => <option key={model}>{model}</option>)}</select></label>
     <label>Base OS<select name="os" defaultValue={kept.os} required><option value="" disabled>Choose…</option>{device.firmware?.releases.map(release => <option key={release}>{release}</option>)}</select></label>
-    <label>It is running<select name="flash" defaultValue={kept.flash} required>{Object.entries(FLASH_STATES).map(([key, label]) => <option key={key} value={key}>{label.replace('an Octamod', 'a Modwerk')}</option>)}</select></label>
+    <label>It is running<select name="flash" defaultValue={kept.flash} required>{DIGI_FLASH_CHOICES.map(key => <option key={key} value={key}>{FLASH_STATES[key]}</option>)}</select></label>
   </div>
   /** A fresh form for the next bug; the device answers and follow choice stay as answered. */
   function reportAnother() { setSent(null); setError(''); setFormKey(key => key + 1) }
@@ -55,7 +55,6 @@ export function DigiIssueReport({ id, openRequest = 0, embedded = false, workspa
   }
   return <details ref={report} className="issue-report" open={embedded || undefined} onToggle={event => { if (event.currentTarget.open) setOpened(true) }}><summary>Report an issue <span>For @{module.author}</span></summary>
     {sent ? <div ref={success} className="issue-report-success" role="status" tabIndex={-1}><BugReportSuccess report={sent} onReportAnother={reportAnother} /></div> : !session.user?.verified ? <MemberPrompt /> : <form key={formKey} className="community-form" aria-busy={busy} onSubmit={event => { event.preventDefault(); void send(event.currentTarget) }}>
-      <BetaReportReminder />
       {!embedded&&<ExistingIssues id={id} tracker={tracker} />}
       {draft && <DiscussionIssueDraft body={draft.body} />}
       <label>Title<input ref={title} name="title" required maxLength={160} defaultValue={draft?.title ?? ''} placeholder="What went wrong, in one line" /></label>
@@ -71,6 +70,7 @@ export function DigiIssueReport({ id, openRequest = 0, embedded = false, workspa
       {embedded?<details className="issue-report-more"><summary>Downloaded build <span>{workspace.modules.length} modules attached</span></summary><ReportConfiguration machine={module.machine} moduleId={module.moduleId} workspace={workspace} log={null} value={configuration} onChange={setConfiguration} disabled={busy}/></details>:<ReportConfiguration machine={module.machine} moduleId={module.moduleId} workspace={workspace} log={null} value={configuration} onChange={setConfiguration} disabled={busy}/>}
       </ReportMoreDetails>
       {isPreview?<p className="service-note">Local preview — nothing is sent.</p>:embedded?<p className="service-note">{tracker?.tracker === 'github' ? 'Your report and configuration are public on GitHub and notify the module’s developers.' : 'Your report is public and notifies the module’s developers. The configuration stays private to you, the maintainers and the administrator.'}</p>:<BugReportNotice tracker={tracker} />}
+      {!isPreview && <AuthorExpectations />}
       <ReportNotifications id={id} defaultChecked={kept.follow} />
       <button className="button button-primary" disabled={busy}>{busy ? 'Posting…' : 'Post report'}</button>
     </form>}

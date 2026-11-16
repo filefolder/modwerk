@@ -14,6 +14,7 @@
  *
  * The controller's backend is boot.c's: the runtime loader's for module
  * packages, plus whole OS images for a RAM boot. */
+#include "status.h"
 #ifdef MODWERK_DSP_LOADER
 #include "selftest.h"
 #include "fxids.h"
@@ -147,6 +148,24 @@ int modwerk_machine_journal_begin_safe(void)
 }
 #endif
 /* A host session is open (an install, a trial, its self-test): dsp.c moves no code meanwhile. */
+/* status.c's transfer screens: what a host is sending now. 0 nothing; else what (1 modules, 2 a base's container for
+ * flash.c, 3 a whole base for a RAM boot: told by the first staged bytes) and, shifted up by four, how far (0 arriving,
+ * with `permille` of it here; 1 all here and being started). Read from the UI task: single words of the engine's state,
+ * and a figure a frame late is no harm. */
+unsigned modwerk_upload_view(uint32_t *permille);
+unsigned modwerk_upload_view(uint32_t *permille)
+{
+    *permille = 0;
+    if (!controller_started) return 0;
+    unsigned phase = controller.phase, step = phase == MU_VERIFIED || phase == MU_PUBLISHING;
+    uint32_t got = controller.received, all = controller.offer.length;
+    if ((phase != MU_RECEIVING && !step) || !all) return 0;
+    const uint8_t *d = controller.staging;
+    unsigned what = got < 4u ? 0 : d[0] == 'E' && d[1] == 'L' && d[2] == 'E' && d[3] == 'K' ? 2u :
+                    d[0] == 0x4fu && d[1] == 0xefu && d[2] == 0xffu && d[3] == 0xe4u ? 3u : 1u; /* boot.c's OS_FIRST */
+    *permille = step || got >= all ? 1000u : got / (all / 1000u + 1u);
+    return what ? what | step << 4 : 0;
+}
 int modwerk_upload_busy(void);
 int modwerk_upload_busy(void) {
 #ifdef MODWERK_RUNTIME_VOLATILE_JOURNAL
@@ -157,6 +176,23 @@ int modwerk_upload_busy(void) {
 #endif
     return controller_started && controller.phase != MU_NORMAL;
 }
+#ifdef MODWERK_SAMPLE_EDITOR
+/* UI observations only. A complete trial may run its module, while receiving,
+ * partial publication, uncertain rollback and a disconnect may not edit. */
+int mw_sample_ep0_wake(const void *message) { return message==wake_message; }
+int mw_sample_transport_ready(void)
+{
+    if(receiving || held)return 0;
+#ifdef MODWERK_RUNTIME_VOLATILE_JOURNAL
+    if(modwerk_runtime_volatile_busy() || modwerk_volatile_busy(VOLATILE_SERVICE))return 0;
+#endif
+#ifdef MODWERK_SAVED_SET_EXPORT
+    if(modwerk_saved_set_busy())return 0;
+#endif
+    return !controller_started || (controller.initialized && controller.active_known && !controller.disconnecting &&
+        (controller.phase==MU_NORMAL || controller.phase==MU_TRIAL));
+}
+#endif
 
 static void wake(void)
 {
@@ -318,6 +354,14 @@ uint32_t modwerk_ep0_dispatch(void)
         out[6] |= 1u; /* feature bit 8: this base writes its own container to NOR over USB (flash.c) */
         return n;
     }
+    /* SLOTS (0xC1, bRequest 39, wValue 0, wLength 24): the two-slot layout as the engine last read it (flash.h),
+     * zeros before its first look. Read-only; bases before the two slots stall it. */
+    if (r.action == MV_STALL && SETUP[0] == MV_RESULT_TYPE && SETUP[1] == 39 && !SETUP[2] && !SETUP[3] &&
+        SETUP[4] == MODWERK_VENDOR_INTERFACE && !SETUP[5] && SETUP[6] == FLASH_SLOTS_BYTES && !SETUP[7]) {
+        for (unsigned i = 0; i < FLASH_SLOTS_BYTES; ++i) out[i] = modwerk_flash_slots[i];
+        modwerk_ep0_reply = out;
+        return FLASH_SLOTS_BYTES;
+    }
 #ifdef MODWERK_RUNTIME_SETS
     /* Exact baseline identity; only cached copies in the ISR. A stale cache
      * wakes its engine owner and refuses this read until it is refreshed. */
@@ -335,6 +379,17 @@ uint32_t modwerk_ep0_dispatch(void)
         SETUP[4] == MODWERK_VENDOR_INTERFACE && !SETUP[5] && (SETUP[6] | SETUP[7] << 8) == 4u + 24u * 13u) {
         modwerk_ep0_reply = out;
         return modwerk_runtime_list(out, SETUP[2], 13u);
+    }
+    /* OFF (0xC1, bRequest 40, wValue the first entry, wLength 288): the modules switched off on the unit (modset.c
+     * modwerk_modset_off_list), so the site shows them and leaves them off; 5 a page, so a host asks on from wValue 5
+     * while a page comes back full. Refused while the shelf moves: the host asks again. Read-only; bases before the
+     * MODULES page stall it. */
+    if (r.action == MV_STALL && SETUP[0] == MV_RESULT_TYPE && SETUP[1] == 40 && SETUP[2] < RUNTIME_MODULES && !SETUP[3] &&
+        SETUP[4] == MODWERK_VENDOR_INTERFACE && !SETUP[5] && (SETUP[6] | SETUP[7] << 8) == 8u + MODSET_OFF_ENTRY * MODSET_OFF_PAGE) {
+        unsigned n = modwerk_modset_off_list(out, SETUP[2], MODSET_OFF_PAGE);
+        if (!n) return MODWERK_EP0_REFUSE;
+        modwerk_ep0_reply = out;
+        return n;
     }
 #ifdef MODWERK_SAVED_SET_EXPORT
     if (r.action == MV_STALL && SETUP[1] >= 31u && SETUP[1] <= 33u) {
@@ -369,7 +424,7 @@ uint32_t modwerk_ep0_dispatch(void)
     /* MISSING (0xC1, bRequest 14, wValue the first entry, wLength 316): the modules the project names that are not
      * installed (dsp.c modwerk_dsp_missing_list), so the host can offer them; at most 13 a page, so a host asks on
      * from wValue 13 while a page comes back full (page 0 is the reply from before pages). Read-only. */
-    if (r.action == MV_STALL && SETUP[0] == MV_RESULT_TYPE && SETUP[1] == 14 && SETUP[2] < MODWERK_FX_IDS && !SETUP[3] &&
+    if (r.action == MV_STALL && SETUP[0] == MV_RESULT_TYPE && SETUP[1] == 14 && SETUP[2] < MODWERK_MISSING_MAX && !SETUP[3] &&
         SETUP[4] == MODWERK_VENDOR_INTERFACE && !SETUP[5] && (SETUP[6] | SETUP[7] << 8) == 4u + 24u * MODWERK_MISSING_PAGE) {
         unsigned modwerk_dsp_missing_list(uint8_t *, unsigned, unsigned);
         modwerk_ep0_reply = out;
@@ -478,6 +533,8 @@ void modwerk_ep0_bus_reset(void)
  * or trial is open is handled as unplugged (mv_tick). */
 #define HOST_TIMEOUT_TICKS 600u
 int modwerk_modset_due(void); /* modset.c: a kept set waits for its save */
+int modwerk_modset_switch_due(void); /* modset.c: PROJ > MODWERK > MODULES asked for a module on or off */
+void modwerk_modset_notice_tick(void); /* modset.c: "MODULES LOADED" once the restored engines run */
 void modwerk_ep0_tick(void);
 static void ep0_tick(void);
 void modwerk_ep0_tick(void)
@@ -486,6 +543,7 @@ void modwerk_ep0_tick(void)
 }
 static void ep0_tick(void)
 {
+    modwerk_modset_notice_tick();
 #ifdef MODWERK_RUNTIME_VOLATILE_JOURNAL
     if(volatile_started && modwerk_volatile_tick(VOLATILE_SERVICE,modwerk_runtime_ticks)) wake();
 #endif
@@ -499,11 +557,14 @@ static void ep0_tick(void)
     if (activity != heard) {
         if (quiet >= HOST_TIMEOUT_TICKS) ((void (*)(const char *, unsigned))0x4005a2b8u)("MODWERK CONNECTED", 0x60);
         heard = activity, quiet = 0;
+        modwerk_flash_host = 1; /* a computer talks to this base: flash.c may confirm its slot */
     } else if (quiet < HOST_TIMEOUT_TICKS) ++quiet;
     if (started && controller_started && mv_tick(vendor(), controller.phase != MU_NORMAL, HOST_TIMEOUT_TICKS)) wake();
     if (controller_started && controller.disconnecting) wake(); /* finish all rows of an abandoned set */
     if (modwerk_boot_tick()) wake(); /* an armed RAM boot is due */
+    if (modwerk_flash_tick()) wake(); /* the slots' first look, or the confirm (flash.c) */
     if (held) held = 0, wake(); /* the engine runs only when woken; an idle unit sends it nothing else */
+    if (modwerk_modset_switch_due()) wake(); /* the engine switches it at its next service */
     /* A kept set the card gate held back (playing, the card busy) or a failed write whose retry is due: twice a
      * second. Only an OUT frame wakes the engine, and a host waiting for the save only reads, so without this the
      * set stayed unsaved until the host's next command (owner's MKII, 20 October 2026: 20 s after a Keep). */
@@ -613,5 +674,6 @@ void modwerk_engine_idle(void)
     modwerk_volatile_service(VOLATILE_SERVICE,modwerk_runtime_ticks);
 #endif
     modwerk_modset_service(); /* a set this pass accepted is saved now: the one above ran before the host's command */
+    modwerk_flash_service(); /* the slots read once after start, and the confirm (flash.c) */
     modwerk_boot_service(); /* an armed RAM boot, once due (boot.c): does not return then */
 }

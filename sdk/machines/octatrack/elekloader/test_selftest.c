@@ -8,8 +8,19 @@
  * -DMODWERK_DSP_ALLOWANCE1=3565 -DMODWERK_DSP_RESERVE=342) */
 #define MODWERK_HOST_SELFTEST
 #include "sha256.c"
-volatile uint32_t modwerk_flash_refusal; /* flash.c, not linked here */
+volatile uint32_t modwerk_flash_refusal, modwerk_flash_quiesced; /* flash.c, not linked here */
+static int usb_disk; int modwerk_machine_usb_disk(void) { return usb_disk; } /* runtime.c, not linked here */
 #include "dsp.c"
+int modwerk_modset_is_off(uint32_t module) { (void)module; return 0; } /* modset.c: nothing switched off */
+/* machine_registry.c's machine map: none here. */
+int modwerk_machine_absent(unsigned k, uint32_t *module, char *name) { (void)k, (void)module, (void)name; return 0; }
+int modwerk_machine_track_absent(unsigned t, uint32_t *module, char *name) { (void)t, (void)module, (void)name; return 0; }
+void modwerk_machine_map_begin(void) {}
+void modwerk_machine_map_stage(const uint8_t *sig, unsigned lo, unsigned hi, uint32_t module, const char *name)
+{ (void)sig, (void)lo, (void)hi, (void)module, (void)name; }
+void modwerk_machine_map_loaded(int ok) { (void)ok; }
+int modwerk_machine_map_line(unsigned k, uint8_t *sig, unsigned *lo, unsigned *hi, uint32_t *module, char *name)
+{ (void)k, (void)sig, (void)lo, (void)hi, (void)module, (void)name; return 0; }
 int modwerk_runtime_restoring(void) { return 0; } /* loader.c's: no restore here */
 volatile uint32_t dl_residency_words[2]; /* manager.c: each core's resident code words (dsp.c's budget box) */
 #include "fxmap.c"
@@ -45,6 +56,7 @@ uint32_t dl_slot_cycles(unsigned i) { (void)i; return 0; }
 volatile uint8_t dl_intended_override[16];
 volatile uint32_t modwerk_status[12], modwerk_status_reads, modwerk_status_fast;
 volatile uint32_t dl_residency_rollbacks, dl_residency_failures, dl_frame_gap, dl_frames, dl_rejected[2], dl_errors;
+volatile uint32_t dl_residency_enabled = 1;
 volatile uint32_t modwerk_modset_generation, modwerk_modset_count, modwerk_modset_result, dl_pool_base[2];
 static unsigned modules;
 unsigned modwerk_runtime_active(void) { return modules; }
@@ -55,8 +67,13 @@ enum runtime_refusal modwerk_runtime_refusal(void) { return test_refusal; }
 static int test_keybus_lost; /* controller_board.c's answer: a live reader whose key bus cannot come up this boot */
 int modwerk_controller_keybus_lost(void) { return test_keybus_lost; }
 int modwerk_machine_stopped(void) { return !modwerk_test_playing; }
+uint32_t modwerk_machine_mask(void) { return 0; }
+void modwerk_machine_unmask(uint32_t sr) { (void)sr; }
+static unsigned posted, posted_code[32], posted_down[32];
+void modwerk_panel_bytes(uint8_t first, uint8_t second) { posted_code[posted % 32u] = 0x100u | first, posted_down[posted % 32u] = second, ++posted; }
 void modwerk_post_key(unsigned code, int pressed)
 {
+    posted_code[posted % 32u] = code, posted_down[posted % 32u] = (unsigned)pressed, ++posted;
     if (pressed && code == 0x28u) modwerk_test_playing = 1; /* PLAY */
     if (pressed && code == 0x27u) modwerk_test_playing = 0; /* STOP */
 }
@@ -148,8 +165,9 @@ static void run(const uint8_t *part, struct runtime_dsp *fx, unsigned n)
     memcpy(lanes, modwerk_test_lanes, sizeof lanes), memcpy(before, bank, sizeof bank);
     CHECK(modwerk_selftest_start());
     for (unsigned tick = 0; modwerk_selftest.state == SELFTEST_RUNNING && tick < 200000u; ++tick) {
-        manager(), selftest_tick();
+        manager(), selftest_tick(), remote_tick();
         if (during) during();
+        if (nudge) nudge = 0, observed_valid = 0; /* dl_residency_nudge: the manager takes the live set again */
     }
     CHECK(modwerk_selftest.state != SELFTEST_RUNNING && !modwerk_test_playing);
     CHECK(!memcmp(modwerk_test_live_fx, part, 16) && settled(part));   /* every slot runs what it ran, its code loaded */
@@ -157,6 +175,15 @@ static void run(const uint8_t *part, struct runtime_dsp *fx, unsigned n)
     CHECK(!memcmp(bank, before, sizeof bank));                         /* every Part, working and saved, untouched */
     for (unsigned i = 0; i < 16u; ++i) CHECK(dl_intended_override[i] == 255u);
     for (unsigned k = 0; k < n; ++k) modwerk_machine_dsp_switch(&fx[k], &none);
+}
+/* A batch whose code went missing while it waited to settle (manager.c unloads code it then cannot reload, finding 70):
+ * E-Verb's code is lost once as the batch is about to be measured, or (`drop_always`) for good: the nudge loads nothing. */
+static int drop_always, dropped;
+static void drop_verb(void)
+{
+    if (modwerk_selftest.phase != SELFTEST_TOGETHER || st_step != HOLD || st_reads != ~0u || (dropped && !drop_always)) return;
+    loaded[0][27] = loaded[1][27] = 0, dropped = 1;
+    if (drop_always) nudge = 0;
 }
 /* Beta finding 63: while the test runs, a machine voice not charged before waits for its end; one charged keeps its. */
 static unsigned during_checked;
@@ -168,6 +195,59 @@ static void frozen_claims(void)
 }
 int main(void)
 {
+    /* Remote keys wait for a whole physical report (#1110): FUNC is 0x2d, the fader's report {0x40, value}. */
+    {
+        /* The self-test's own key, from the tick: both halves at once, or nothing while a report is half sent. */
+        posted = 0;
+        CHECK(press(0x27u) && posted == 2 && posted_code[0] == 0x27u && posted_down[0] == 1 && posted_down[1] == 0);
+        modwerk_test_panel_header = 0;
+        CHECK(!press(0x28u) && posted == 2 && !modwerk_test_playing);
+        modwerk_test_panel_header = 1, modwerk_test_panel_count = 2;
+        CHECK(!press(0x28u) && posted == 2);
+        modwerk_test_panel_count = 0;
+        /* Control: nothing half sent, so a key goes out on the next tick, press before release. */
+        posted = 0;
+        CHECK(modwerk_remote_key(0x2du, 1) && modwerk_remote_key(0x2du, 0) && posted == 0); /* never from the caller */
+        remote_tick();
+        CHECK(posted == 2 && posted_code[0] == 0x2du && posted_down[0] == 1 && posted_code[1] == 0x2du && posted_down[1] == 0);
+        /* Press race: the fader's header is in, its value is not. The key waits, whatever the ringer holds. */
+        posted = 0, modwerk_test_panel_header = 0;
+        CHECK(modwerk_remote_key(0x2du, 1));
+        remote_tick(), remote_tick();
+        CHECK(posted == 0);
+        modwerk_test_panel_header = 1, modwerk_test_panel_count = 1; /* the value is rung, not yet parsed */
+        remote_tick();
+        CHECK(posted == 0);
+        modwerk_test_panel_count = 0; /* parsed: the report is whole */
+        remote_tick();
+        CHECK(posted == 1 && posted_code[0] == 0x2du && posted_down[0] == 1);
+        /* Release race: the same for a release, which was lost. */
+        posted = 0, modwerk_test_panel_header = 0;
+        CHECK(modwerk_remote_key(0x2du, 0));
+        remote_tick();
+        CHECK(posted == 0);
+        modwerk_test_panel_header = 1;
+        remote_tick();
+        CHECK(posted == 1 && posted_code[0] == 0x2du && posted_down[0] == 0);
+        /* Two keys of one row (0x28 and 0x2d, row 5) in one tick: the second is built from rows the parser has not
+         * updated yet, so it waits a tick. Another row's key and a raw report go out with the first. */
+        posted = 0;
+        CHECK(modwerk_remote_key(0x2du, 1) && modwerk_remote_bytes(0x40u, 0x70u) && modwerk_remote_key(0x08u, 1) && modwerk_remote_key(0x28u, 1));
+        remote_tick();
+        CHECK(posted == 3 && posted_code[1] == 0x140u && posted_down[1] == 0x70u && posted_code[2] == 0x08u);
+        remote_tick();
+        CHECK(posted == 4 && posted_code[3] == 0x28u);
+        modwerk_test_playing = 0;
+        /* Sixteen wait at most; the seventeenth is refused, and eight go out a tick. */
+        posted = 0;
+        for (unsigned i = 0; i < 16u; ++i) CHECK(modwerk_remote_key(i * 8u % 64u, 1));
+        CHECK(!modwerk_remote_key(0, 1) && !modwerk_remote_key(64u, 1));
+        remote_tick();
+        CHECK(posted == 8);
+        remote_tick(), remote_tick();
+        CHECK(posted == 16);
+        posted = 0, modwerk_test_playing = 0;
+    }
     (void)rebind_tick; /* test_dsp.c covers it */
     dl_pool_base[0] = dl_pool_base[1] = 0x40;
     /* An E-Verb-sized module (1,588 words), and core 0 (T5-T8) full of stock reverbs: 1,963 of its 2,396 words. */
@@ -233,6 +313,22 @@ int main(void)
     test_keybus_lost = 0;
     modwerk_selftest_refresh();
     CHECK(modwerk_selftest.refusal == RUNTIME_OK);
+    /* A batch that never settles must not hold the test until the site gives up (a tester's 16 modules waited three
+     * minutes, 25 October 2026): nudged, the manager loads the code again and the test passes; code that never comes
+     * back fails the test as refused, with the module named, in seconds, and the tracks come back. */
+    during = drop_verb, dropped = 0;
+    run(blank, &verb, 1);
+    CHECK(dropped && modwerk_selftest.state == SELFTEST_PASSED && !modwerk_selftest.failed && modwerk_selftest.ran == 1);
+    drop_always = 1, dropped = 0;
+    run(blank, &verb, 1);
+    during = 0, drop_always = 0;
+    CHECK(dropped && modwerk_selftest.state == SELFTEST_FAILED && modwerk_selftest.failed == SELFTEST_REFUSED);
+    CHECK(modwerk_selftest.culprit == 0x873d83ccu && !strcmp((const char *)modwerk_selftest.culprit_name, "E-Verb"));
+    /* A stall earlier this boot shut the loader off (dsp.c recover): the test fails as stopped, whatever else runs. */
+    dl_residency_enabled = 0;
+    run(blank, &verb, 1);
+    CHECK(modwerk_selftest.state == SELFTEST_FAILED && (modwerk_selftest.failed & SELFTEST_STOPPED));
+    dl_residency_enabled = 1;
     if (failures) { fprintf(stderr, "%u self-test checks failed\n", failures); return 1; }
     puts("Octatrack self-test: a module crowded off one core runs on the other or on a core of its own, one no core holds "
          "fails alone and is named, a refused batch member runs in the next batch, and the Part and its knobs come back.");

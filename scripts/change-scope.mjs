@@ -4,10 +4,15 @@ import { readFileSync, lstatSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { manifestBuildFields } from './module-source.mjs'
+import { alternation, moduleFolders } from './machine-folders.mjs'
+import { touchesBaseSize } from './base-size.mjs'
 
-const moduleFolder = /^sdk\/(octabam|digitakt|digitone|analog-rytm-mkii)\/modules\/[^/]+\//
-const manifest = /^sdk\/(octabam|digitakt|digitone|analog-rytm-mkii)\/modules\/[^/]+\/(octamod|modwerk)\.module\.json$/
-const digiManifest = /^sdk\/(digitakt|digitone|analog-rytm-mkii)\/modules\/[^/_][^/]*\/modwerk\.module\.json$/
+// The machine registry names each machine's module folder: the Octatrack's, the elemod machines' (compiled firmware)
+// and the Zoom pedals' (prebuilt effect files, no compile job).
+const ELEMOD = alternation(moduleFolders('elemod')), LISTED = alternation(moduleFolders().filter(folder => folder !== 'octatrack'))
+const moduleFolder = new RegExp(`^sdk\\/(${alternation(moduleFolders())})\\/modules\\/[^/]+\\/`)
+const manifest = new RegExp(`^sdk\\/(octatrack|${ELEMOD})\\/modules\\/[^/]+\\/(octamod|modwerk)\\.module\\.json$`)
+const digiManifest = new RegExp(`^sdk\\/(${LISTED})\\/modules\\/[^/_][^/]*\\/modwerk\\.module\\.json$`)
 const catalogs = new Set(['src/catalog/module-documents.json'])
 const json = text => text === null ? null : JSON.parse(text)
 const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -40,13 +45,19 @@ export function isDocumentationChange({ path, before, after, regular = true }) {
   return false
 }
 
-/** Whether a change needs no new module version. A Digitakt/Digitone manifest edit that changes only documentation or
- * compatibility.conflicts needs none, as on the Octatrack, whose version rule compares build fields only: flags are
- * compatibility metadata that a newer module's arrival can change. It still runs every check. */
+/** Whether a change needs no new module version. A Digitakt/Digitone manifest edit that changes only documentation,
+ * compatibility.conflicts or how the module and its author are credited (the display name, author.name and
+ * author.credits, license.declaration) needs none, as on the Octatrack, whose version rule compares build fields only:
+ * flags are compatibility metadata that a newer module's arrival can change, and credits are displayed text. The
+ * author's GitHub login, maintainers and licence stay versioned. It still runs every check. */
 export function isVersionNeutralChange(change) {
   const { path, before, after } = change
   if (!digiManifest.test(path) || before === null || after === null) return isDocumentationChange(change)
-  const strip = text => { const document = withoutDocumentation(json(text)); return { ...document, compatibility: { ...document.compatibility, conflicts: null } } }
+  const strip = text => {
+    const document = withoutDocumentation(json(text))
+    return { ...document, name: null, author: { ...document.author, name: null, credits: null },
+      license: document.license && { ...document.license, declaration: null }, compatibility: { ...document.compatibility, conflicts: null } }
+  }
   return canonical(strip(before)) === canonical(strip(after))
 }
 
@@ -63,7 +74,7 @@ function nativeChange(change, machine) {
   if (isDocumentationPath(path)) return false
   const match = path.match(manifest)
   if (match) {
-    if ((machine === 'octatrack') !== (match[1] === 'octabam')) return false
+    if ((machine === 'octatrack') !== (match[1] === 'octatrack')) return false
     if (before === null || after === null) return true
     return machine === 'octatrack' ? manifestBuildFields(before) !== manifestBuildFields(after)
       : canonical(digiFirmwareFields(before)) !== canonical(digiFirmwareFields(after))
@@ -73,10 +84,10 @@ function nativeChange(change, machine) {
     return canonical(identity(before)) !== canonical(identity(after))
   }
   const common = /^sdk\/(build|runtime)\//.test(path)
-  if (machine === 'octatrack') return common || /^sdk\/octabam\/(modules|platform|tools|dsp|licenses)\//.test(path)
+  if (machine === 'octatrack') return common || /^sdk\/octatrack\/modules\//.test(path) || /^sdk\/octabam\/(platform|tools|dsp|licenses)\//.test(path)
     || path === 'sdk/catalog.json' || /^src\/engine\/assets\/(?!elemod\/)/.test(path)
     || /^scripts\/(build-module-packages\.py|build-utility-packages\.py|build-usb-audio-packages\.py|build-modules-isolated\.sh|import-module-build\.mjs|module-source\.mjs)$/.test(path)
-  return common || /^sdk\/(digitakt|digitone|analog-rytm-mkii|elemod|machines)\//.test(path) || /^vendor\/elekloader\/(catalog\/|elekloader\.lock\.json$|upstream-catalog\.json$)/.test(path) || /^sdk\/imports\/elekloader-[^/]+\.json$/.test(path)
+  return common || new RegExp(`^sdk\\/(${ELEMOD}|elemod|machines)\\/`).test(path) || /^vendor\/elekloader\/(catalog\/|elekloader\.lock\.json$|upstream-catalog\.json$)/.test(path) || /^sdk\/imports\/elekloader-[^/]+\.json$/.test(path)
     || /^sdk\/octabam\/(scripts\/vendor\.sh|tools\/patches\/|tools\/harness\/dsp_host)/.test(path)
     || /^scripts\/(build-elemod[^/]*|elemod-elf\.mjs|verify-elemod-source-parity\.mjs|package-elemod-recipe\.mjs|verify-elemod-release-exports\.mjs)$/.test(path)
     || /^src\/engine\/assets\/elemod\//.test(path)
@@ -100,7 +111,8 @@ const workerTrees = /^(server|migrations|src\/(community|catalog|devices|config|
 const workerFiles = ['worker.ts', 'wrangler.worker.jsonc', 'package-lock.json', 'src/hosting.ts', 'src/support.ts', 'sdk/catalog.json', 'docs/news/008-beta-invitation.draft.json', '.github/workflows/worker.yml', '.github/module-authors.json']
 function workerChange({ path, before, after }) {
   if (catalogs.has(path) && before !== null && after !== null) return canonical(workerCatalog(json(before))) !== canonical(workerCatalog(json(after)))
-  // The Worker bundles the generated (uncommitted) Digitakt/Digitone list, which follows these manifests.
+  // The Worker bundles the generated (uncommitted) list of every machine's modules but the Octatrack's
+  // (src/catalog/machine-modules.json), which follows these manifests.
   if (digiManifest.test(path)) return before === null || after === null || canonical(workerCatalog({ modules: [json(before)] })) !== canonical(workerCatalog({ modules: [json(after)] }))
   if (/\.test\.ts$/.test(path) || /\.tsx$/.test(path) || isDocumentationPath(path)) return false
   return workerTrees.test(path) || workerFiles.includes(path)
@@ -118,13 +130,19 @@ export function classifyChanges(changes) {
     if (change.path === '.github/workflows/pages.yml') scope.modules ||= compilerJob(change.before, 'source-packages') !== compilerJob(change.after, 'source-packages')
     scope.worker ||= workerChange(change)
     scope.logger ||= change.path.startsWith('sdk/runtime/logging/') && !isDocumentationPath(change.path)
-    scope.windows ||= /^src\/catalog\/module-folder\.|^scripts\/(modules|module-qualification)\.mjs$/.test(change.path)
+    scope.windows ||= /^src\/catalog\/module-folder\.|^scripts\/(modules|module-cpu-price|machine-modules|module-qualification)\.mjs$/.test(change.path)
       || /^scripts\/(prepare-runtime-spans|runtime_private_paths)\.py$|^sdk\/tests\/test_runtime_spans\.py$/.test(change.path)
       || /^scripts\/frontend-mcp(?:-private-host)?\.mjs$|^sdk\/tests\/test_frontend_mcp_host\.py$/.test(change.path)
   }
   scope.windows ||= scope.modules || scope.elemod
   return scope
 }
+
+// Site, Worker and release-note paths the SDK suite (sdk:check) never reads: no test, builder or script it runs names
+// them (change-scope.test.mjs enforces it), and an audited run (26 Oct 2026) opened none. Everything else reaches it,
+// src/engine, src/catalog and src/config included. Keep the list short and certain; a path left off only costs time.
+const outsideSdkSuite = /^(?:src\/(?:components|hooks|devices|projects|legal|overview|storage)\/|src\/community\/(?!module-|ot-log|octatrack-diagnostics)|src\/[^/]+\.(?:tsx|css|test\.ts)$|server\/|worker\.ts$|changelog\/|docs\/.+\.md$)/
+export const reachesSdkSuite = path => !outsideSdkSuite.test(path)
 
 /** Compare exact Git trees; local checks also include unstaged and untracked edits. */
 export function readChangeScope({ root, base, head = null }) {
@@ -142,13 +160,14 @@ export function readChangeScope({ root, base, head = null }) {
     if (!entry) return { text: null, regular: true }
     return { text: git('show', ref + ':' + path), regular: entry.startsWith('100644 ') || entry.startsWith('100755 ') }
   }
-  return classifyChanges([...new Set(names)].map(path => {
+  const sdk = names.length === 0 || names.some(reachesSdkSuite)
+  return { ...classifyChanges([...new Set(names)].map(path => {
     // Only manifests/catalogs/workflows need their contents; never dump image or firmware bytes.
     const inspect = manifest.test(path) || catalogs.has(path) || path === 'sdk/catalog.json' || /^\.github\/workflows\/(module-pr|pages)\.yml$/.test(path)
     if (!inspect) return { path, before: '', after: '', regular: true }
     const before = read(commit, path), after = read(head, path)
     return { path, before: before.text, after: after.text, regular: before.regular && after.regular }
-  }))
+  })), sdk, base: names.some(touchesBaseSize) }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

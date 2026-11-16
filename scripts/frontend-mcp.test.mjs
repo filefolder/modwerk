@@ -66,7 +66,8 @@ describe('frontend MCP protocol and isolated site workflows', () => {
     const catalogue = await service.call('site_catalogue', { machine: 'octatrack', beta: true })
     expect(catalogue.machines.some(item => item.id === 'octatrack')).toBe(true)
     expect((await service.call('site_module', { id: 'everb' })).controls.length).toBeGreaterThan(0)
-    expect((await service.call('site_selection', { moduleIds: ['vector', 'analog-bassdrum'] })).conflicts.length).toBeGreaterThan(0)
+    // Without `usb` only the catalogue is asked: whether a set fits is the unit's own admission at sync.
+    expect(await service.call('site_selection', { moduleIds: ['vector', 'analog-bassdrum'] })).toEqual({ availability: '' })
     const usb = catalogue.modules.filter(module => module.usb).map(module => module.id)
     expect(usb.length).toBeGreaterThanOrEqual(4)
     expect(usb).toContain('usb-audio-out-tracks-main-cue')
@@ -84,12 +85,19 @@ describe('frontend MCP protocol and isolated site workflows', () => {
     await expect(service.call('site_selection', { moduleIds: ['sidechain-compressor'], usb: true, capabilities })).rejects.toThrow('latest Modwerk base')
     const cardOnly = catalogue.modules.find(module => module.machine === 'octatrack' && !module.usb)
     if (cardOnly) await expect(service.call('site_selection', { moduleIds: [cardOnly.id], usb: true })).rejects.toThrow('USB')
-    // A module whose package needs a base DSP feature (the key bus) is USB-only: card firmware has no base.
-    expect((await service.call('site_selection', { moduleIds: ['everb'] })).card).toBe('')
-    for (const module of catalogue.modules.filter(module => module.machine === 'octatrack' && module.card === false))
-      expect((await service.call('site_selection', { moduleIds: [module.id] })).card).toMatch('over USB')
-    // Without the beta interface there is no USB sync, so the public catalogue offers no USB-only module.
-    expect((await service.call('site_catalogue', { machine: 'octatrack' })).modules.filter(module => module.card === false)).toEqual([])
+    // A module that needs the base is in the catalogue like any other: there is no card form to keep it from.
+    expect((await service.call('site_catalogue', { machine: 'octatrack' })).modules.some(module => module.id === 'ring-sc')).toBe(true)
+  })
+  it('offers the agent board, refuses claims without --allow-api-writes and never reaches the live board in tests', async () => {
+    expect((await service.call('site_features')).tools).toEqual(expect.arrayContaining(['board_claims', 'board_claim', 'board_release', 'board_messages', 'board_inbox', 'board_activity', 'board_post', 'board_reply', 'board_close']))
+    await expect(service.call('board_claim', { kind: 'migration', key: '0085' })).rejects.toThrow('--allow-api-writes')
+    await expect(service.call('board_release', { id: '00000000-0000-0000-0000-000000000000' })).rejects.toThrow('--allow-api-writes')
+    await expect(service.call('board_post', { kind: 'question', topic: 'machine', key: 'octatrack', text: 'Anyone on FX2?' })).rejects.toThrow('--allow-api-writes')
+    await expect(service.call('board_reply', { id: '00000000-0000-0000-0000-000000000000', text: 'Yes' })).rejects.toThrow('--allow-api-writes')
+    await expect(service.call('board_close', { id: '00000000-0000-0000-0000-000000000000' })).rejects.toThrow('--allow-api-writes')
+    await expect(service.call('board_post', { kind: 'note', topic: 'machine', key: 'octatrack', text: 'x' })).rejects.toThrow()
+    await expect(service.call('board_claims', { kind: 'module' })).rejects.toThrow('turned off')
+    await expect(service.call('board_messages', { machine: 'octatrack' })).rejects.toThrow('turned off')
   })
   it('round trips sets through frontend validation without including private firmware', async () => {
     const created = await service.call('set_save', { name: 'MCP test', moduleIds: ['miniverb'] })

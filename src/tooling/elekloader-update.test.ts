@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEVICE } from '../engine/elekloader/digi-build'
 import { DEVICES, KIT_PROTOCOL, catalogChanges, describeChange, followUps, libraryCatalog, mergeCatalogOverlay, readKitZip, type KitJson } from '../../scripts/elekloader-update.ts'
+import { kitNotice, replacementText } from '../../scripts/elekloader-vendor.ts'
 import { PROTOCOL } from '../../vendor/elekloader/kit/src/kit/protocol.ts'
 
 const sha = (data: Uint8Array) => createHash('sha256').update(data).digest('hex')
@@ -107,7 +108,7 @@ describe('the elekloader update', () => {
     const root = fileURLToPath(new URL('../..', import.meta.url))
     const changes = catalogChanges({ revision: 'a', cores: [], mods: [] }, { revision: 'b', cores: [pin('core', '1.53')], mods: [pin('digichain', '1.53')] })
     expect(followUps(root, changes, { components: [] }, cut.required)).toEqual([
-      'Cores changed (core for digitakt-mk1 OS 1.53: added 1 (core-1.53-digitakt-mk1.elemod)): builds for those OS releases change. Build them and record the identities in docs/VERIFICATION.md.',
+      'Cores changed (core for digitakt-mk1 OS 1.53: added 1 (core-1.53-digitakt-mk1.elemod)): builds for those OS releases change. Build them and record the identities in docs/verification/<YYYY-MM-DD>-<topic>.md.',
       'digitakt/digichain comes with the catalog because a library mod requires it: it needs no library entry.',
     ])
   })
@@ -127,6 +128,12 @@ describe('the elekloader update', () => {
     expect(cut.catalog.mods.map(item => item.id)).toEqual(['perform-direct'])
     expect(cut.leftOut).toEqual(['digitakt/digislicer'])
     expect(DEVICES['digitakt-mk2']).toBe('digitakt-ii')
+  })
+  it('ships the kit NOTICE whole, keeping its credit for the code the replaced files stand in for', () => {
+    const notice = readFileSync(join(ROOT, 'vendor/elekloader/kit/NOTICE'), 'utf8'), shipped = kitNotice(notice)
+    expect(shipped.endsWith(notice)).toBe(true)
+    expect(shipped).toContain('Code from other projects')
+    expect(shipped).toContain("replaced by Modwerk's own implementation")
   })
   it('adds pinned site packages to the existing catalog without replacement and fingerprints the result', () => {
     const pin = (id: string, device: string, file: string, sha256: string) => ({
@@ -150,6 +157,9 @@ describe('the elekloader update', () => {
     expect(merged.revision).toMatch(/^[a-f0-9]{64}$/)
     expect(mergeCatalogOverlay(merged, overlay)).toEqual(merged)
     expect(() => mergeCatalogOverlay(base, { ...overlay, cores: [pin('core', 'digitakt-mk2', 'core-2.1.elemod', 'd'.repeat(64))] })).toThrow('changes the existing file')
+    const forked = { ...overlay.mods[0], source: { repo: 'someone/modwerk', commit: 'f'.repeat(40), path: 'sdk/imports/packages/perform-direct/perform-direct-1.0.elemod' } }
+    expect(() => mergeCatalogOverlay(base, { ...overlay, mods: [forked] })).toThrow('so source.repo is repeat98/modwerk, not someone/modwerk')
+    expect(mergeCatalogOverlay(base, { ...overlay, mods: [{ ...forked, source: { ...forked.source, repo: 'repeat98/modwerk' } }] }).mods).toHaveLength(1)
   })
 })
 
@@ -170,12 +180,12 @@ function fixture() {
     mkdirSync(dirname(join(root, path)), { recursive: true })
     cpSync(join(ROOT, path), join(root, path), { recursive: true })
   }
-  for (const path of [...noticePaths, 'LICENSE', 'LICENSES', 'docs/USB_AUDIO_ATTRIBUTION.txt', 'scripts/elekloader-update.ts', 'scripts/elekloader-vendor.ts', 'scripts/licenses.mjs', 'scripts/license-notices.mjs']) copy(path)
+  for (const path of [...noticePaths, 'LICENSE', 'LICENSES', 'scripts/elekloader-update.ts', 'scripts/elekloader-vendor.ts', 'scripts/licenses.mjs', 'scripts/license-notices.mjs', 'src/engine/elektron/codec', 'src/engine/elektron/odd-jumps.ts']) copy(path)
   // The module records that add Modwerk-built pins to the upstream catalog.
   for (const name of readdirSync(join(ROOT, 'sdk/imports')).filter(name => /^elekloader-.*\.json$/.test(name))) copy('sdk/imports/' + name)
   const manifest = JSON.parse(readFileSync(join(root, 'sdk/octabam/licenses/manifest.json'), 'utf8')) as { moduleComponents: Record<string, string[]> }
   for (const id of Object.keys(manifest.moduleComponents)) {
-    const folder = `sdk/octabam/modules/${id}`
+    const folder = `sdk/octatrack/modules/${id}`
     copy(folder + '/octamod.module.json')
     const document = JSON.parse(readFileSync(join(root, folder, 'octamod.module.json'), 'utf8')) as { license: { file: string } }
     copy(folder + '/' + document.license.file)
@@ -222,6 +232,18 @@ describe('elekloader update CLI', { timeout: 60_000 }, () => {
       const again = update(root, args)
       expect(again.status, again.stderr).toBe(0)
       expect(identities(root)).toEqual(before)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it('installs the re-export over a replaced kit file and records the upstream file it stands for', () => {
+    const root = fixture()
+    try {
+      const upstream = text('export const upstreamCode = 1\n')
+      const result = update(root, fullKitZip(root, files => { files['src/codec/elz.ts'] = upstream }))
+      expect(result.status, result.stderr).toBe(0)
+      expect(readFileSync(join(root, 'vendor/elekloader/kit/src/codec/elz.ts'), 'utf8')).toBe(replacementText('src/codec/elz.ts'))
+      const lock = JSON.parse(readFileSync(join(root, 'vendor/elekloader/elekloader.lock.json'), 'utf8')) as { kit: { replaced: Record<string, string> } }
+      expect(lock.kit.replaced['src/codec/elz.ts']).toBe(sha(upstream))
+      expect(result.stdout).toContain('Upstream changed src/codec/elz.ts')
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
   it('refuses a same-protocol kit that cannot read the current catalog before changing any installed file', () => {

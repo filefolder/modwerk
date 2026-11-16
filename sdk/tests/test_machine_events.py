@@ -44,20 +44,47 @@ class MachineEventTests(unittest.TestCase):
         result = host(self, OT / 'elekloader/test_midi_generators.c')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_sample_memory_on_the_host(self):
+        # ot_sample_memory (sample_memory.c): pages borrowed from stock's sample pool survive a cold init and come back.
+        result = host(self, OT / 'elekloader/test_sample_memory.c')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_registry_knows_every_protect_port_signature(self):
         # The validator keeps a known PROTECT machine's 12 bytes while it is absent (the boot's battery restore runs
-        # before the saved set reinstalls it: beta finding 24). The list must be exactly the PROTECT ports.
+        # before the saved set reinstalls it: beta finding 24). The list must be exactly the PROTECT ports and the
+        # native PROTECT machine modules' declared signatures (their package rows), each with its version range.
         text = (OT / 'elekloader/machine_registry.c').read_text()
         listed = re.search(r'\} known\[\] = \{(.*?)\};', text).group(1)
         known = {(a + b, int(lo), int(hi)) for a, b, lo, hi in re.findall(r"\{\{'(.)', '(.)'\}, (\d+), (\d+)\}", listed)}
         ports = json.loads((ADAPTERS / 'machine-ports.json').read_text())['ports']
         protect = {(p['machine']['sig'], p['machine']['lo'], p['machine']['hi']) for p in ports.values()
                    if 'PROTECT' in p.get('machine', {}).get('flags', [])}
-        self.assertEqual(known, protect)
+        # A native machine module declares its signature in its package row (partSignature), not here; a draft
+        # without a package row is still named here.
+        rows = json.loads((ROOT / 'src/engine/assets/octatrack-module-packages.json').read_text())['packages']
+        native = {(r['partSignature']['sig'], r['partSignature']['lo'], r['partSignature']['hi']) for r in rows
+                  if 'PROTECT' in r.get('partSignature', {}).get('flags', [])}
+        self.assertIn(('WV', 1, 15), native)  # SYNTIZ: the model is the version byte, 1-6 used, up to 15 kept
+        native |= {('FR', 1, 1)}  # FRACT (sdk/drafts/fract-machine/registration.c)
+        self.assertEqual(known, protect | native)
         self.assertIn(('AB', 1, 1), known)
+
+    def test_chooser_rows_match_the_tables_room(self):
+        # Each admitted machine can contribute a START record; both tables fit the registry's chooser rows.
+        rows = int(re.search(r'#define ROWS (\d+)u', (OT / 'elekloader/machine_registry.c').read_text()).group(1))
+        events = {e['event']: e for e in json.loads((OT / 'events.json').read_text())['events']}
+        for name in ('ot_machines', 'ot_machine_starts'):
+            self.assertEqual(rows, 5 + events[name]['room'], name)
 
     def test_contributor_admission_on_the_host(self):
         result = host(self, ADAPTERS / 'test_machine_contributors.c', ADAPTERS / 'machine_lifetime.c', ADAPTERS / 'machine_parts.c')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_board_start_admission_before_ordinary_fast_path(self):
+        result = host(self, ADAPTERS / 'test_machine_start_admission.c',
+                      *(ADAPTERS / (name + '.c') for name in ('machine_contributors', 'machine_lifetime', 'machine_parts',
+                        'machine_admission', 'machine_declarations', 'table_admission', 'table_declarations',
+                        'sample_editor_actions')))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_registry_cross_compiles_without_new_optimisation_flags(self):
@@ -65,9 +92,11 @@ class MachineEventTests(unittest.TestCase):
         if not gcc:
             self.skipTest('no ColdFire compiler')
         with tempfile.TemporaryDirectory() as temp:
-            subprocess.run([gcc, '-mcpu=5475', '-msoft-float', '-O2', '-std=c99', '-ffreestanding', '-fno-builtin', '-Wall', '-Wextra',
+            for source in (OT / 'elekloader/machine_registry.c', ADAPTERS / 'machine_contributors.c',
+                           ADAPTERS / 'machine_admission_runtime.c'):
+                subprocess.run([gcc, '-mcpu=5475', '-msoft-float', '-O2', '-std=c99', '-ffreestanding', '-fno-builtin', '-Wall', '-Wextra',
                             '-Werror', '-DMODWERK_RUNTIME_EVENTS', '-DRUNTIME_MODULES=128u', *INCLUDES, '-c',
-                            OT / 'elekloader/machine_registry.c', '-o', temp + '/r.o'], check=True, capture_output=True)
+                            source, '-o', temp + '/' + source.stem + '.o'], check=True, capture_output=True)
             subprocess.run(['m68k-elf-as', '-mcpu=5475', OT / 'elekloader/machine_registry.s', '-o', temp + '/s.o'],
                            check=True, capture_output=True)
 
@@ -89,10 +118,22 @@ class MachineEventTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp:
                     Path(temp, 'g.s').write_text(text)
                     subprocess.run([asm, '-mcpu=54455', temp + '/g.s', '-o', temp + '/g.o'], check=True, capture_output=True)
-                    if entry.get('machine'):  # the descriptor is exactly one ot_machines record
+                    if entry.get('machine'):  # the descriptor is exactly one ot_machines record (a SETUP_PAGE one's
+                        # struct modwerk_machine_setup: the machine and two words)
                         out = subprocess.check_output(['m68k-elf-nm', '-n', temp + '/g.o'], text=True).split('\n')
                         at = {l.split()[2]: int(l.split()[0], 16) for l in out if len(l.split()) == 3}
-                        self.assertEqual(at['mw_machine_label'] - at['mw_machine'], records['ot_machines'], name)
+                        setup = 8 if 'SETUP_PAGE' in entry['machine']['flags'] else 0
+                        self.assertEqual(at['mw_machine_label'] - at['mw_machine'], records['ot_machines'] + setup, name)
+
+    def test_setup_page_words_follow_the_machine_only_with_the_flag(self):
+        entry = {'machine': {'sig': 'XS', 'lo': 1, 'hi': 1, 'label': 'X', 'flags': ['POOL'], 'fields': {'setup_page': 'x_page'}}}
+        with self.assertRaises(ValueError):
+            machine_ports.glue('x', entry)
+        entry['machine']['flags'].append('SETUP_PAGE')
+        entry['machine']['fields']['setup_knob'] = 'x_knob'
+        text = machine_ports.glue('x', entry)
+        self.assertIn('.byte   0, 0, 0, 0\n        .long   x_page\n        .long   x_knob\nmw_machine_label:', text)
+        self.assertIn('.long   mw_machine_label, 66, 0, 0\n', text)
 
     def test_no_kept_code_returns_into_the_middle_of_a_base_site(self):
         """A taker's entry and every kept unit return to stock past each base-owned site, never into its bytes."""
@@ -110,6 +151,50 @@ class MachineEventTests(unittest.TestCase):
                     at = int(target[0], 16) if target[0] else int(target[1])
                     inside = [hex(a) for a, n in spans if a < at < a + n]
                     self.assertEqual(inside, [], '%s %s jumps to %#x' % (name, unit.label, at))
+
+    def test_start_selection_leaves_existing_module_writes_disjoint(self):
+        """Do not take the selected call: Mute Modes owns its argument pushes/call."""
+        from remix import registry
+        reg = json.loads((OT / 'events.json').read_text())
+        start = next(e for e in reg['events'] if e['event'] == 'ot_machine_starts')
+        spans = [(int(s['site'], 16), s['length']) for s in start['sites']]
+        for module in registry.modules().values():
+            writes = [(d.site, d.pad_to or 6) for d in module.detours]
+            writes += [(p.addr, len(p.write)) for p in module.pokes]
+            writes += [(r.addr, 4) for r in module.symbol_refs]
+            for at, length in writes:
+                self.assertFalse(any(at < a + n and a < at + length for a, n in spans),
+                                 '%s writes at %#x overlap source START selection' % (module.name, at))
+
+    def test_a_hook_raised_when_a_routine_returns_keeps_its_caller(self):
+        """An "after" hook: the site's tail keeps the caller's return address and puts the base's after-entry in its
+        place, and that entry returns to the kept address after raising the hook. The dispatch assembles."""
+        spec = importlib.util.spec_from_file_location('ot_events', OT / 'events.py')
+        events = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(events)
+        reg = events.load()
+        text = events.asm(reg)
+        after = [e for e in reg['events'] if e.get('after')]
+        self.assertGreaterEqual(len(after), 5)
+        for e in after:
+            at = '%08x' % e['after']
+            tail = [x for x in reg['sites'][e['after']]['tail'] if isinstance(x, str)]
+            self.assertEqual(sum('modwerk_return_' + at in x for x in tail), 1, e['event'])
+            self.assertEqual(sum('modwerk_after_' + at in x for x in tail), 1, e['event'])
+            self.assertIn('modwerk_after_%s:\n        move.l  modwerk_return_%s,-(%%sp)\n        pea     modwerk_runtime_event_row+%d\n'
+                          '        bra.w   modwerk_after_row\n' % (at, at, 4 * (e['index'] - 4)), text)
+            self.assertIn('modwerk_return_%s: .long 0' % at, text)
+        doc = json.loads((OT / 'events.json').read_text())
+        with tempfile.TemporaryDirectory() as temp:  # two hooks after one site: refused
+            doc['events'].append(dict(next(x for x in doc['events'] if x.get('after')), event='ev_twice', index=doc['events'][-1]['index'] + 1))
+            Path(temp, 'e.json').write_text(json.dumps(doc))
+            with self.assertRaises(ValueError):
+                events.load(Path(temp, 'e.json'))
+        asm = shutil.which('m68k-elf-as')
+        if asm:
+            with tempfile.TemporaryDirectory() as temp:
+                Path(temp, 'e.s').write_text(text)
+                subprocess.run([asm, '-mcpu=54455', temp + '/e.s', '-o', temp + '/e.o'], check=True, capture_output=True)
 
 
 if __name__ == '__main__':

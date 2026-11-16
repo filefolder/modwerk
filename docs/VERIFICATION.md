@@ -1,5 +1,7 @@
 # Verification record
 
+Frozen on 25 October 2026, with the entries up to then. A module's results now go in its own `TESTING.md`, and any other record (a base, kit, core or builder change) in its own file, `docs/verification/<YYYY-MM-DD>-<topic>.md` ([index](README.md)). `npm run check` refuses new entries here.
+
 ## Deja Vu 0.1.0-experimental — 24 October 2026
 
 New Octatrack module, Jan Kolkmeier's draft (#869) released: three audio-track LFO waves, DJV, DJQ and DJC, sharing a loop of remembered random values per LFO. ColdFire only: one 2,784-byte DRAM unit with 2,784 bytes of state, three dispatch slots of the waveform table, the WAVE count, the label clamp, the icon bound and the two grown WAVE tables (StockCopy in the USB package, TableGrow in card builds, chosen by the loader's `octabam_<name>` run name). No chooser row and no base input, so the published beta base stays as it is.
@@ -263,7 +265,7 @@ Counts are not measured chip timing. Fresh DSP-enabled control/assignment
 captures were opened and reviewed. The required Node 24 check passes 1,402
 app tests in 200 files and 86 SDK tests, catalogue/licences, lint, types and the
 production bundle. Firmware and reference audio remain private.
-See [the exact-source approval](../sdk/analog-bassdrum-build-approval.json) and
+See [the exact-source approval](../sdk/approvals/analog-bassdrum-build-approval.json) and
 [the testing record](../sdk/octabam/modules/analog-bassdrum/TESTING.md).
 
 ## Digitakt II browser-builder preview — 10 October 2026

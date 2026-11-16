@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { ModError, applyWholeBuilds, linkMods, parseElemod, type LinkDevice } from './elemod'
+import { LINK_DEVICES, ModError, applyWholeBuilds, checkLinkable, linkMods, parseElemod, type LinkDevice } from './elemod'
+import { ELE2_DEVICES } from './ele2'
+import { ELE3_DEVICES } from './ele3'
+import A4_PROFILE from '../../../sdk/machines/analog-four-mkii/machine.json'
 import { fromImage } from '../../../vendor/elekloader/kit/src/store.ts'
 
 // A synthetic machine whose "stock" image is 4 KiB of NOPs: no Elektron firmware involved.
@@ -44,6 +47,26 @@ describe('elemod linker', () => {
     await expect(linkMods([parse(core), parse(mod('big', 0x40000100, { sections: { '.run': { parts: [['hex', '4e75']] }, '.bss': { size: 8192 } } }))], image)).rejects.toThrow('need RAM')
   })
 
+  it('refuses a mod that references or copies a routine the device keeps unlinkable', async () => {
+    const guarded: LinkDevice = { ...device, noLink: [...ELE2_DEVICES['analog-rytm-mki'].noLink, [0x40000400, 0x40000410, 'a test routine']] }
+    const on = (doc: Record<string, unknown>) => parseElemod(doc, String(doc.id), [guarded])
+    const run = { '.run': { parts: [['hex', '4e7500000000']] }, '.bss': { size: 16 } }
+    const mods = [core,
+      mod('caller', 0x40000100, { symbols: { handler: ['.run', 0], flash_program: ['abs', '0x40096af6'] }, exports: ['flash_program'] }),
+      mod('jumper', 0x40000200, { sections: run, relocs: [['.run', 2, 'abs32', 'abs', 0x4011a7a4]] }),
+      mod('user', 0x40000300, { sections: run, imports: ['flash_program'], relocs: [['.run', 2, 'pc32', 'sym:flash_program', 2]] }),
+      mod('copier', 0x40000500, { sections: { '.run': { parts: [['stock', '0x40000408', 4]] }, '.bss': { size: 16 } } })].map(on)
+    const refused = (await checkLinkable(mods, image)).filter(problem => problem.includes('no mod may link to it'))
+    expect(refused).toEqual([
+      'caller 1.0: symbol flash_program reaches 0x40096af6-0x40096b3e, the flash program routine every flash write uses: no mod may link to it on the Test machine',
+      'jumper 1.0: a reference to 0x4011a7a4 reaches 0x4011a7a4-0x4011aa7a, BOOTSTRAP UPGRADE, which rewrites the boot flash: no mod may link to it on the Test machine',
+      'user 1.0: a reference to 0x40096af8 reaches 0x40096af6-0x40096b3e, the flash program routine every flash write uses: no mod may link to it on the Test machine',
+      'copier 1.0: a stock copy from 0x40000408 reaches 0x40000400-0x40000410, a test routine: no mod may link to it on the Test machine',
+    ])
+    await expect(linkMods(mods, image)).rejects.toThrow('no mod may link to it')
+    expect((await linkMods([on(core), on(mod('one', 0x40000100))], image)).order).toEqual(['core 1.0', 'one 1.0'])
+  })
+
   it('applies a single whole build and refuses two', async () => {
     const whole = (id: string) => ({ elemod: 1, id, version: '1.0', target, sites: [], blob: { load: '0x40001000', len: 2, sha256: sha(Uint8Array.from([0x4e, 0x75])), parts: [['hex', '4e75']] } })
     expect((await applyWholeBuilds([parse(whole('os'))], image)).length).toBe(image.length + 2)
@@ -75,5 +98,15 @@ describe('elemod linker', () => {
     await expect(linkMods([parseRytm({ ...core, target: rytmTarget }), parseRytm(keeper('one', 0x40000100, 3))], image)).rejects.toThrow('declares mod storage')
     expect(() => parseRytm({ ...keeper('bad', 0x40000100, 3), storage: [{ sym: 'x', scope: 'song', bits: 3 }] })).toThrow(ModError)
     expect((await linkMods([parse(core), parse(mod('one', 0x40000100))], image)).store).toBeNull()
+  })
+})
+
+describe('Analog Four MKII linker profile', () => {
+  it('matches the machine profile and the elekloader device', () => {
+    const a4 = LINK_DEVICES.find(item => item.machine === 'analog-four-mkii')!
+    // elekloader's device key, which the browser builder and catalog pins use
+    expect(a4).toMatchObject({ key: 'analog-four-mk2', sysexId: ELE3_DEVICES['analog-four-mkii'].sysexId, mainLoad: ELE3_DEVICES['analog-four-mkii'].mainLoad, ddr: [0x47be0000, 0x47c00000] })
+    expect(a4.releases.map(release => [release.version, release.syxSha256])).toEqual(A4_PROFILE.firmware.releases.map(release => [release.version, release.files[0].sha256]))
+    expect(a4.ddr[1] - a4.ddr[0]).toBe(A4_PROFILE.sdk.budgets.find(budget => budget.name === 'Shared mod memory')!.value)
   })
 })

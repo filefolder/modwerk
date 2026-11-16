@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { sha } from '../../../vendor/elekloader/kit/src/bytes.ts'
 import { FAKE_BASE, fakeBaseOf, fakeSession, fakeUnit } from '../../dev/octatrack-link-fake'
-import { packSection } from '../../../vendor/elekloader/kit/src/codec/aplib.ts'
+import { packSection } from '../elektron/codec/pack.ts'
 import { encodeBin } from '../../../vendor/elekloader/kit/src/elek.ts'
 import { removalPackage } from './module-set'
-import { LinkBusyError, OctatrackLink, openFailure, tabLocks } from './octatrack-link'
+import { BaseTooBigError, LinkBusyError, OctatrackLink, POWER_CYCLE_MS, StaleLoadError, inUseHint, linkBusy, octatrackRank, openFailure, pickOctatrack, tabLocks, type LinkDevice, type LinkUsb } from './octatrack-link'
 import { UploadUnconfirmedError } from './upload-session'
-import { UsbVendorTransport } from './upload-usb'
+import { UsbVendorTransport, parseBaseSlots } from './upload-usb'
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } }
@@ -56,6 +56,10 @@ describe('finding the unit', () => {
     expect(openFailure('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/141.0')).toBe('Chrome couldn’t open the Octatrack. Unplug it, plug it back in and try again.')
     expect(openFailure('Mozilla/5.0 (Linux; Android 15) Chrome/141.0')).toContain('Unplug it')
   })
+  it('names the computer, not only another tab, when Windows can’t claim the unit', () => {
+    expect(linkBusy('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/141.0')).toContain('install the latest base from the card once')
+    expect(linkBusy('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/141.0')).not.toContain('card')
+  })
   it('reports a browser without WebUSB instead of offering a dead button', () => {
     expect(new OctatrackLink(undefined).getState().status).toBe('unsupported')
   })
@@ -93,6 +97,16 @@ describe('finding the unit', () => {
     await vi.waitFor(() => expect(link.getState().status).toBe('busy'))
     unit.taken = false; await vi.advanceTimersByTimeAsync(3000)
     await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+  })
+  it('stays busy through a retry that finds the unit still held, so the sidebar card does not flicker', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const unit = fakeUnit(), link = new OctatrackLink(unit.usb, fakeSession(unit))
+    unit.taken = true; link.start()
+    await vi.waitFor(() => expect(link.getState().status).toBe('busy'))
+    const seen: string[] = []; link.subscribe(() => seen.push(link.getState().status))
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every(status => status === 'busy')).toBe(true)
   })
   it('stays connected while any view still uses it', async () => {
     const unit = fakeUnit(), link = new OctatrackLink(unit.usb, fakeSession(unit))
@@ -174,7 +188,7 @@ describe('sending a module', () => {
     expect(progress.at(-1)).toBe(1)
     await link.keep()
     expect(link.getState()).toMatchObject({ status: 'ready', notice: { tone: 'success' }, active: sha(data) })
-    expect(link.getState().notice!.text).toMatch(/Kept\. PREVIEW VOL stays on your Octatrack, also after a restart/)
+    expect(link.getState().notice!.text).toMatch(/Synced\. PREVIEW VOL stays on your Octatrack, also after a restart/)
   })
   it('keeps the trial running when playback blocks keep, and finishes once stopped', async () => {
     const { unit, link } = await linked()
@@ -195,15 +209,16 @@ describe('sending a module', () => {
     unit.playing = true; await link.update('PREVIEW VOL', one)
     expect(link.getState()).toMatchObject({ status: 'ready', notice: { tone: 'error', text: 'Stop playback or finish recording on the Octatrack to continue.' } })
   })
-  it('stress-tests an update before it can be kept, and undoes it when the test fails', async () => {
+  it('installs an update without running a self-test', async () => {
     const { link } = await linked(), seen: string[] = []
     link.subscribe(() => { seen.push(link.getState().status) })
-    await link.update('My set', one, async () => null)
-    expect(seen).toContain('testing')
-    expect(link.getState()).toMatchObject({ status: 'trial', tested: true })
+    const selftest = vi.spyOn(UsbVendorTransport.prototype, 'selftest')
+    await link.update('My set', one)
+    expect(seen).not.toContain('testing')
+    expect(link.getState()).toMatchObject({ status: 'trial', module: 'My set' })
     await link.keep()
-    await link.update('My set', one, async () => 'CPU over budget on track 3')
-    expect(link.getState()).toMatchObject({ status: 'ready', notice: { tone: 'error', text: 'The self-test failed: CPU over budget on track 3. Nothing was kept.' } })
+    expect(selftest.mock.calls.filter(([start]) => start)).toEqual([])
+    selftest.mockRestore()
   })
   it('refuses a module bigger than the base can stage', async () => {
     const { link } = await linked()
@@ -216,17 +231,57 @@ describe('sending a module', () => {
     await link.update('PREVIEW VOL', one)
     expect(link.getState().notice?.text).toBe('Cancelled. Nothing changed on the Octatrack.')
   })
+  it('reports the step a sync failed at', async () => {
+    const { unit, link } = await linked()
+    const failures: unknown[] = []
+    link.subscribeDiagnostics(event => { if (event.event === 'sync_failed') failures.push({ error: event.error, step: event.step, refusal: event.refusal }) })
+    unit.refusal = 7 // the fake unit refuses the package as it is staged
+    await link.update('PREVIEW VOL', one)
+    expect(failures).toEqual([{ error: 'device', step: 'stage', refusal: 7 }])
+  })
+  it('reports what stopped a sync whose transfer was never confirmed', async () => {
+    const causes = [new DOMException('private text', 'NetworkError'), Object.assign(new Error('private text'), { name: 'TimeoutError' }), undefined], failures: unknown[] = []
+    for (const cause of causes) {
+      const unit = fakeUnit(), base = fakeSession(unit)
+      let calls = 0
+      const connect: typeof base = async (...args) => {
+        const session = await base(...args)
+        if (++calls !== 2) return session
+        let trusted = true // the update's session: a chunk's reply goes missing mid-transfer
+        return Object.create(session, {
+          connectionTrusted: { get: () => trusted },
+          stage: { value: async () => { trusted = false; unit.staged = true; throw new UploadUnconfirmedError('chunk was not confirmed', session.status, cause) } },
+        })
+      }
+      const link = new OctatrackLink(unit.usb, connect, 300)
+      link.subscribeDiagnostics(event => { if (event.event === 'sync_failed') failures.push({ error: event.error, kind: event.kind }) })
+      link.start(); await settle(); await settle()
+      await link.update('PREVIEW VOL', one)
+    }
+    expect(failures).toEqual(['NetworkError', 'TimeoutError', 'OtherError'].map(kind => ({ error: 'transport', kind })))
+  })
   it('says why the Octatrack rejected a module, from the base’s record', async () => {
     const { unit, link } = await linked()
     unit.refusal = 7 // a track plays the effect it would replace
     await link.update('PREVIEW VOL', one)
-    expect(link.getState().notice?.text).toMatch(/A track is playing this module’s effect/)
+    expect(link.getState().notice?.text).toMatch(/A track is using a module this sync changes or removes, as its effect or its machine/)
+    expect(link.getState().notice?.text).not.toContain('Look for') // nothing in this change was marked as on the unit
     unit.refusal = 10 // RUNTIME_FEATURE: the key bus cannot come up this boot
     await link.update('PREVIEW VOL', one)
     expect(link.getState().notice?.text).toMatch(/can’t start the key bus this module needs until it restarts/)
+    unit.refusal = 8 // RUNTIME_STOCK: a site's stock bytes are not the ones the package names
+    await link.update('PREVIEW VOL', one)
+    expect(link.getState().notice?.text).toMatch(/doesn’t match what is running on your Octatrack, so nothing changed/)
     unit.refusal = 1 // malformed: the plain text
     await link.update('PREVIEW VOL', one)
     expect(link.getState().notice?.text).toBe('The Octatrack can’t run this module file.')
+  })
+  it('names the modules a track may be using, once each and at most five', () => {
+    expect(inUseHint([])).toBe('')
+    expect(inUseHint(['Tape Echo', 'Tape Echo'])).toBe(' Look for Tape Echo on the tracks.')
+    expect(inUseHint(['Tape Echo', 'BBD Delay', 'Deja Vu'])).toBe(' Look for Tape Echo, BBD Delay, or Deja Vu on the tracks.')
+    expect(inUseHint(['A', 'B', 'C', 'D', 'E'])).toBe(' Look for A, B, C, D, or E on the tracks.')
+    expect(inUseHint(['A', 'B', 'C', 'D', 'E', 'F'])).toBe(' Look for A, B, C, D, or 2 more on the tracks.')
   })
   it('stages again when the loader was busy for a moment', async () => {
     const { unit, link } = await linked()
@@ -244,7 +299,7 @@ describe('sending a module', () => {
     await link.undo()
     unit.publishRefusal = 7 // anything else stays a refusal, in words
     await link.update('PREVIEW VOL', one)
-    expect(link.getState().notice?.text).toMatch(/A track is playing this module’s effect/)
+    expect(link.getState().notice?.text).toMatch(/A track is using a module this sync changes or removes, as its effect or its machine/)
   })
   it('recovers from a missing reply without asking to unplug', async () => {
     const unit = fakeUnit(), base = fakeSession(unit)
@@ -293,12 +348,19 @@ describe('sending a module', () => {
     expect(link.getState().status).toBe('idle')
     stop()
   })
-  it('does not resurrect a trial when the self-test finishes after a disconnect', async () => {
-    const { unit, link } = await linked(), gate = deferred(), entered = deferred()
-    const loading = link.update('PREVIEW VOL', one, async () => { entered.resolve(); await gate.promise; return null })
+  it('does not resurrect a trial when its start finishes after a disconnect', async () => {
+    const unit = fakeUnit(), base = fakeSession(unit), gate = deferred(), entered = deferred()
+    const connect: typeof base = async (...args) => {
+      const session = await base(...args)
+      return Object.create(session, { startTrial: { value: async () => { await session.startTrial(); entered.resolve(); await gate.promise } } })
+    }
+    const link = new OctatrackLink(unit.usb, connect), stop = link.start()
+    await settle(); await settle()
+    const loading = link.update('PREVIEW VOL', one)
     await entered.promise; unit.unplug(); gate.resolve(); await loading
     expect(link.getState().status).toBe('idle')
-    expect(link.getState().notice?.text).toMatch(/undoes PREVIEW VOL/)
+    expect(link.getState().notice?.text).toMatch(/undoes the unfinished load/)
+    stop()
   })
   it('does not confirm Keep from a reply received after disconnecting', async () => {
     const unit = fakeUnit(), base = fakeSession(unit), gate = deferred(), entered = deferred()
@@ -318,11 +380,14 @@ describe('sending a module', () => {
     const unit = fakeUnit(), base = fakeSession(unit), gate = deferred(), entered = deferred()
     const connect: typeof base = async (...args) => {
       const session = await base(...args)
-      return Object.create(session, { rollback: { value: async () => { entered.resolve(); await gate.promise; return session.rollback() } } })
+      return Object.create(session, {
+        startTrial: { value: async () => { await session.startTrial(); throw new StaleLoadError() } }, // a load that fails once trialled
+        rollback: { value: async () => { entered.resolve(); await gate.promise; return session.rollback() } },
+      })
     }
     const link = new OctatrackLink(unit.usb, connect, 300), stop = link.start()
     await settle(); await settle()
-    const loading = link.update('PREVIEW VOL', one, async () => 'CPU over budget')
+    const loading = link.update('PREVIEW VOL', one)
     await entered.promise; stop(); gate.resolve(); await loading
     expect(link.getState().status).toBe('idle')
     const restart = link.start()
@@ -422,19 +487,43 @@ describe('loading a module set', () => {
   const install = (id: string) => { const data = new Uint8Array(36); data.set([0x4d, 0x57, 0x52, 0x4d, 0, 4]); const view = new DataView(data.buffer); view.setUint32(8, 4); view.setUint32(28, Number.parseInt(id, 16)); return data }
   const change = (id: string, removes = false) => ({ module: 'M' + id.slice(-1), data: removes ? removalPackage(id) : install(id), undo: removes ? install(id) : removalPackage(id) })
   const set = [change('0000000a', true), change('0000000b'), change('0000000c')]
-  async function loaded(stressTest?: () => Promise<string | null>) {
+  async function loaded() {
     const result = await linked('base', true); result.unit.modules = ['0000000a']
-    await result.link.update('Live', set, stressTest)
+    await result.link.update('Live', set)
     return result
   }
+  it('names what the sync removes or replaces when a track is using one of them', async () => {
+    const { unit, link } = await linked('base', true); unit.modules = ['0000000a']
+    unit.refusal = 7 // a track plays the effect the sync would remove
+    await link.update('Live', [{ ...set[0], module: 'Tape Echo', replaces: true }, { ...set[1], module: 'Deja Vu', replaces: false }])
+    const text = link.getState().notice?.text
+    expect(text).toMatch(/^A track is using a module this sync changes or removes/)
+    expect(text).toContain('then try again. Look for Tape Echo on the tracks.')
+    expect(text).not.toContain('Deja Vu') // added by this sync: no track can be using it yet
+  })
   it('trials the complete set without accepting any change before Keep', async () => {
-    const { unit, link } = await loaded(async () => null)
-    expect(link.getState()).toMatchObject({ status: 'trial', module: 'Live', tested: true })
+    const { unit, link } = await loaded()
+    expect(link.getState()).toMatchObject({ status: 'trial', module: 'Live' })
     expect(unit.kept).toEqual([])
     await link.keep()
     expect(unit.kept).toEqual(['-0000000a', '+0000000b', '+0000000c'])
-    expect(link.getState().notice).toMatchObject({ tone: 'success', text: 'Kept. Live stays on your Octatrack, also after a restart.' })
+    expect(link.getState().notice).toMatchObject({ tone: 'success', text: 'Synced. Live stays on your Octatrack, also after a restart.' })
     expect((await link.inventory())!.map(item => item.module)).toEqual(['0000000b', '0000000c'])
+  })
+  it('says a kept set is still to be saved when the unit has not saved it in time, and that a save failed only when it did', async () => {
+    const reading = (saved: number) => ({ state: 0, failed: 0, modules: 0, dsp: 0, intact: 0, ran: 0, peaks: { cpu: 0, tracks1to4: 0, tracks5to8: 0 }, done: 0, total: 0, frameGap: 0, saved, savedCount: 0, live: 2, culprit: 0, culpritName: '', refusal: 0 })
+    for (const [saved, tone, text, event] of [[2, 'success', /^Synced\. The Octatrack is still busy and saves Live to the card once/, 'kept'], [8, 'error', /^Kept, but the Octatrack couldn’t save Live/, 'sync_failed']] as const) {
+      const { link } = await loaded(), events: string[] = []
+      link.subscribeDiagnostics(diagnostic => events.push(diagnostic.event))
+      vi.spyOn(UsbVendorTransport.prototype, 'selftest').mockResolvedValue(reading(saved))
+      vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] })
+      const keeping = link.keep()
+      await vi.advanceTimersByTimeAsync(21000)
+      vi.useRealTimers(); await keeping
+      expect(link.getState().notice).toMatchObject({ tone, text: expect.stringMatching(text) })
+      expect(events.filter(name => name === 'kept' || name === 'sync_failed')).toEqual([event])
+      vi.restoreAllMocks()
+    }
   })
   it('undoes the whole set on the device without sending inverse packages', async () => {
     const { unit, link } = await loaded()
@@ -448,10 +537,30 @@ describe('loading a module set', () => {
     unit.stuck = 2; await link.undo()
     expect(link.getState()).toMatchObject({ status: 'ready', notice: { tone: 'success', text: 'Undone. Your Octatrack is back to how it was.' } })
   })
-  it('undoes the set when the self-test fails', async () => {
-    const { unit, link } = await loaded(async () => 'the Octatrack’s DSP stopped')
-    expect(unit.kept).toEqual([])
-    expect(link.getState().notice?.text).toBe('The self-test failed: the Octatrack’s DSP stopped. Nothing was kept.')
+  it('finishes an acknowledged twenty-row rollback without reporting a failed sync', async () => {
+    const unit = fakeUnit(), base = fakeSession(unit), rollback = vi.fn()
+    unit.moduleSets = true
+    const connect: typeof base = async (...args) => {
+      const session = await base(...args)
+      return Object.create(session, { rollback: { value: () => { rollback(); return session.rollback() } } })
+    }
+    const link = new OctatrackLink(unit.usb, connect), stop = link.start()
+    try {
+      await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+      const changes = Array.from({ length: 20 }, (_, i) => change((256 + i).toString(16).padStart(8, '0')))
+      await link.update('Large set', changes)
+      expect(link.getState().status).toBe('trial')
+      // The real backend restores one row per acknowledged engine turn.
+      unit.stuck = changes.length - 1
+      vi.useFakeTimers({ toFake: ['setTimeout', 'Date'] })
+      const undo = link.undo()
+      await vi.advanceTimersByTimeAsync(5000)
+      await undo
+      expect(rollback).toHaveBeenCalledTimes(20)
+      expect(unit.kept).toEqual([])
+      expect(unit.modules).toEqual([])
+      expect(link.getState()).toMatchObject({ status: 'ready', active: FAKE_BASE, notice: { tone: 'success', text: 'Undone. Your Octatrack is back to how it was.' } })
+    } finally { stop() }
   })
   it('keeps the baseline when the device refuses a complete set', async () => {
     const unit = fakeUnit(), base = fakeSession(unit)
@@ -544,6 +653,14 @@ describe('several tabs of the site', () => {
   })
 })
 
+// flash.h's SLOTS record: "MWSS", layout, the running slot, flags, then per slot generation, state, tries.
+function record(layout: number, running: number, flags: number, a: [number, number, number], b: [number, number, number]) {
+  const view = new DataView(new ArrayBuffer(24))
+  ;[0x4d, 0x57, 0x53, 0x53, layout, running, flags].forEach((byte, i) => view.setUint8(i, byte))
+  ;[a, b].forEach(([generation, state, tries], k) => { view.setUint32(8 + 8 * k, generation); view.setUint8(12 + 8 * k, state); view.setUint8(13 + 8 * k, tries) })
+  return new Uint8Array(view.buffer)
+}
+
 describe('updating the base over USB', () => {
   // A card file as buildBase makes one: the kit's container around a small packed image.
   function fakeBin() {
@@ -560,7 +677,7 @@ describe('updating the base over USB', () => {
     const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = [], shown = new Set<string>()
     link.subscribe(() => { const { status, baseUpdate } = link.getState(); shown.add(status + ':' + baseUpdate) })
     await link.updateBase(bin, expected, step => steps.push(step))
-    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'restarting', 'done'])
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving', 'restarting', 'done'])
     expect(unit.flashed).toBe(expected)
     expect(link.getState()).toMatchObject({ status: 'ready', identity: { base: expected }, active: expected, baseUpdate: undefined })
     // Every view shows the update, also while the unit restarts and the link is idle in between.
@@ -572,14 +689,37 @@ describe('updating the base over USB', () => {
     link.start(); await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
     const { bin, expected } = fakeBin(), steps: string[] = []
     await link.updateBase(bin, expected, step => steps.push(step))
-    expect(dedupe(steps)).toEqual(['staging', 'starting', 'staging', 'starting', 'started', 'writing', 'restarting', 'done'])
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'staging', 'starting', 'started', 'writing', 'saving', 'restarting', 'done'])
+    expect(unit.flashed).toBe(expected)
+  })
+  it('refuses a base larger than the unit’s base stages before anything is sent', async () => {
+    const { unit, link } = await linked(), { bin, image, expected } = fakeBin(), steps: string[] = []
+    unit.capacity = image.length - 1
+    const refused = await link.updateBase(bin, expected, step => steps.push(step)).catch(error => error)
+    expect(refused).toBeInstanceOf(BaseTooBigError)
+    expect(refused).toMatchObject({ bytes: image.length, capacity: image.length - 1 })
+    expect(dedupe(steps)).toEqual(['staging'])
+    expect(unit.base).toBe(FAKE_BASE); expect(unit.flashed).toBe(FAKE_BASE)
+    await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+    expect(link.getState().baseUpdate).toBeUndefined()
+  })
+  it('after the step base, arms once more when the unit restarts on the same base from flash', async () => {
+    // The step base saved itself and runs on out of RAM: its first arming only restarts it from NOR, on the same identity.
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.fromRam = true
+    await expect(link.updateBase(bin, expected)).rejects.toThrow('not the new one')
+    expect(unit.flashed).toBe(FAKE_BASE)
+    unit.fromRam = true
+    await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+    await link.updateBase(bin, expected, step => steps.push(step), undefined, true)
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'staging', 'starting', 'started', 'writing', 'saving', 'restarting', 'done'])
     expect(unit.flashed).toBe(expected)
   })
   it('skips the trial when the new base already runs, and refuses after the trial when the new base cannot write itself', async () => {
     const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
     unit.base = expected; unit.unplug(); unit.plug('base'); await vi.waitFor(() => expect(link.getState().identity?.base).toBe(expected))
     await link.updateBase(bin, expected, step => steps.push(step))
-    expect(dedupe(steps)).toEqual(['started', 'writing', 'restarting', 'done'])
+    expect(dedupe(steps)).toEqual(['started', 'writing', 'saving', 'restarting', 'done'])
     const older = fakeUnit(); older.updatesBase = false
     const old = new OctatrackLink(older.usb, fakeSession(older), 300)
     old.start(); await vi.waitFor(() => expect(old.getState().status).toBe('ready'))
@@ -593,10 +733,201 @@ describe('updating the base over USB', () => {
     unit.writeRefusal = 5 // flash.h FLASH_PROTECTED: every write was refused this way before the boot snapshot
     await expect(link.updateBase(bin, expected, step => steps.push(step))).rejects.toThrow(
       'The new base refused to write itself (reason 105), so nothing was written. A power cycle returns the Octatrack to its current base and modules.')
-    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing'])
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving'])
     expect(unit.flashed).toBe(FAKE_BASE); expect(unit.base).toBe(expected)
     await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
     expect(link.getState().baseUpdate).toBeUndefined()
+  })
+  // With fake timers: the reconnects wait for the unit to stay connected for seconds.
+  async function run(update: Promise<void>) {
+    let done = false
+    update.then(() => { done = true }, () => { done = true })
+    while (!done) await vi.advanceTimersByTimeAsync(100)
+    return update
+  }
+  it('carries on through a USB dropout during the write until the unit is back on the new base from NOR', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.writeDropouts = 1
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await run(link.updateBase(bin, expected, step => steps.push(step)))
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving', 'reconnecting', 'writing', 'saving', 'restarting', 'done'])
+    expect(unit.flashed).toBe(expected)
+    expect(link.getState()).toMatchObject({ status: 'ready', identity: { base: expected }, baseUpdate: undefined })
+  })
+  // "The Octatrack stopped answering" at Save: a reply lost while the container was still being sent ended the update,
+  // though nothing was written (14 November 2026).
+  it('sends the container again when a reply is lost before the write began', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.stageLosses = 2
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await run(link.updateBase(bin, expected, step => steps.push(step)))
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'started', 'writing', 'started', 'writing', 'saving', 'restarting', 'done'])
+    expect(unit.flashed).toBe(expected)
+  })
+  it('ends with the lost reply once the container could not be sent in four tries, nothing written', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin()
+    unit.stageLosses = 9
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await expect(run(link.updateBase(bin, expected))).rejects.toThrow(UploadUnconfirmedError)
+    expect(unit.flashed).toBe(FAKE_BASE)
+  })
+  it('writes again after a failed verify, the unit staying up from RAM', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.writeFails = 1
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await run(link.updateBase(bin, expected, step => steps.push(step)))
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving', 'reconnecting', 'writing', 'saving', 'restarting', 'done'])
+    expect(unit.flashed).toBe(expected)
+  })
+  it('asks to keep the unit on when the save is never confirmed', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.writeFails = 9
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await expect(run(link.updateBase(bin, expected, step => steps.push(step)))).rejects.toThrow('Keep it switched on')
+    expect(steps.filter(step => step === 'reconnecting')).toHaveLength(3)
+    expect(unit.flashed).toBe(''); expect(unit.base).toBe(expected) // still up from RAM, for the next try
+    expect(link.getState().baseUpdate).toBeUndefined()
+  })
+  // At most one restart per update (owner, 25 October 2026).
+  async function counting(unit: ReturnType<typeof fakeUnit>, layout: number) {
+    unit.slots = record(layout, layout === 1 ? 0 : 0xff, 0, layout === 1 ? [2, 3, 1] : [0, 0, 0], [0, 0, 0])
+    const link = new OctatrackLink(unit.usb, fakeSession(unit), 300), plug = unit.plug.bind(unit)
+    let starts = 0
+    unit.plug = kind => { starts++; plug(kind) }
+    link.start(); await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+    return { link, restarts: () => starts }
+  }
+  // The running base writing another's container quiesced stock, and the DSP stall that followed hung units (30 October
+  // 2026): on two slots the new base starts from RAM too and saves itself into the spare slot while it runs on.
+  it('updates a unit on two slots with one restart: the trial, then the new base saves itself into the spare slot', async () => {
+    const unit = fakeUnit(), { link, restarts } = await counting(unit, 1), { bin, expected } = fakeBin(), steps: string[] = []
+    expect(link.getState().slots).toMatchObject({ layout: 'two' })
+    await link.updateBase(bin, expected, step => steps.push(step))
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving', 'done'])
+    expect(unit.flashed).toBe(expected); expect(unit.base).toBe(expected); expect(restarts()).toBe(1)
+  })
+  // A restart can lose USB until the power is cycled (reported, not yet measured on a Modwerk base): past POWER_CYCLE_MS
+  // the site asks for one instead of waiting out 90 s, and still takes a late return.
+  const noting = (steps: string[]) => (step: string, _fraction?: number, slow?: boolean) => { steps.push(slow ? step + ' slow' : step) }
+  // A tester's unit saved the new base, then hung at the logo on the restart: the site said "reconnecting", wrote again
+  // and ended on the text about MIDI recovery. A verified save is not written again; the restart's failure ends it.
+  it('ends an update whose restart after the saved write never comes back, without writing again', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.restartHangs = true
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await expect(run(link.updateBase(bin, expected, noting(steps)))).rejects.toThrow('Switch it off and on: it starts on the new base.')
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving', 'restarting', 'restarting slow'])
+    expect(unit.flashed).toBe(expected)
+  })
+  it('does not ask for a power cycle when the unit is back in time', async () => {
+    const { link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await run(link.updateBase(bin, expected, noting(steps)))
+    await vi.advanceTimersByTimeAsync(2 * POWER_CYCLE_MS)
+    expect(steps.filter(step => step.endsWith('slow'))).toEqual([])
+  })
+  it('asks for a power cycle when the trial’s restart is not back, then carries on from the base the unit starts', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.bootHangs = 1
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const update = link.updateBase(bin, expected, noting(steps))
+    await vi.advanceTimersByTimeAsync(POWER_CYCLE_MS - 1000)
+    expect(steps.at(-1)).toBe('starting')
+    await vi.advanceTimersByTimeAsync(2000) // the sends before the restart take a few fake timer turns too
+    expect(steps.at(-1)).toBe('starting slow')
+    unit.base = unit.active = unit.flashed; unit.plug('base') // switched off and on: the flashed base starts
+    await run(update)
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'starting slow', 'staging', 'starting', 'started', 'writing', 'saving', 'restarting', 'done'])
+    expect(unit.flashed).toBe(expected)
+  })
+  it('still takes the new base when it comes back late by itself after the ask', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.bootHangs = 1
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const update = link.updateBase(bin, expected, noting(steps))
+    await vi.advanceTimersByTimeAsync(POWER_CYCLE_MS + 15000)
+    unit.plug('base') // still on the new base from RAM
+    await run(update)
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'starting slow', 'started', 'writing', 'saving', 'restarting', 'done'])
+  })
+  it('ends with the power cycle when the trial’s restart never comes back, nothing saved', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin()
+    unit.bootHangs = 1
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    await expect(run(link.updateBase(bin, expected))).rejects.toThrow('Switch it off and on, then start the update again.')
+    expect(unit.flashed).toBe(FAKE_BASE)
+  })
+  it('stops when the unit comes back on its current base twice after asking for the power cycle', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.bootHangs = 2
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const update = link.updateBase(bin, expected, noting(steps)), failed = expect(update).rejects.toThrow('not the new one')
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await vi.advanceTimersByTimeAsync(POWER_CYCLE_MS + 2000)
+      unit.base = unit.active = unit.flashed; unit.plug('base')
+    }
+    await run(update.catch(() => {})); await failed
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'starting slow', 'staging', 'starting', 'starting slow'])
+    expect(unit.flashed).toBe(FAKE_BASE)
+  })
+  it('converts a unit with one copy with one restart: the trial, then the new base saves itself and runs on', async () => {
+    const unit = fakeUnit(), { link, restarts } = await counting(unit, 0), { bin, expected } = fakeBin(), steps: string[] = []
+    await link.updateBase(bin, expected, step => steps.push(step))
+    expect(dedupe(steps)).toEqual(['staging', 'starting', 'started', 'writing', 'saving', 'done'])
+    expect(unit.flashed).toBe(expected); expect(unit.base).toBe(expected); expect(restarts()).toBe(1)
+    expect(link.getState()).toMatchObject({ status: 'ready', baseUpdate: undefined, slots: { layout: 'two' } })
+  })
+  // The write publishes the container, so the unit's active digest is the container's now; without a restart, no HELLO
+  // reads it again. The first sync then failed as changed by another tab, and only its retry went through.
+  it('syncs straight after a base update that saved itself without a restart, not as changed by another tab', async () => {
+    const unit = fakeUnit(), { link } = await counting(unit, 0), { bin, expected } = fakeBin()
+    await link.updateBase(bin, expected)
+    expect(link.getState().active).toBe(unit.active)
+    await link.update('Set', [{ module: 'M', data: new Uint8Array(4000).fill(3) }])
+    expect(link.getState()).toMatchObject({ status: 'trial', module: 'Set' })
+    expect(link.getState().notice).toBeUndefined()
+    await link.keep()
+    expect(unit.active).toBe(sha(new Uint8Array(4000).fill(3)))
+  })
+  it('still refuses a sync planned before another tab loaded, after a base update', async () => {
+    const unit = fakeUnit(), locks = tabLocks()
+    unit.slots = record(0, 0xff, 0, [0, 0, 0], [0, 0, 0])
+    const a = new OctatrackLink(unit.usb, fakeSession(unit), 300, locks), b = new OctatrackLink(unit.usb, fakeSession(unit), 300, locks)
+    a.start(); b.start()
+    await vi.waitFor(() => expect([a.getState().status, b.getState().status]).toEqual(['ready', 'ready']))
+    const { bin, expected } = fakeBin()
+    await a.updateBase(bin, expected)
+    await a.update('Set A', [{ module: 'A', data: new Uint8Array(4000).fill(1) }])
+    const waiting = b.update('Set B', [{ module: 'B', data: new Uint8Array(4000).fill(2) }])
+    await a.keep()
+    await waiting
+    expect(b.getState().notice?.text).toBe('Another tab changed your Octatrack meanwhile, so nothing was synced. Review the sync again.')
+  })
+  it('stops at once when flash holds neither layout: nothing was written (refusal 108)', async () => {
+    const { unit, link } = await linked(), { bin, expected } = fakeBin(), steps: string[] = []
+    unit.writeRefusal = 8 // flash.h FLASH_LAYOUT
+    await expect(link.updateBase(bin, expected, step => steps.push(step))).rejects.toThrow('(reason 108), so nothing was written')
+    expect(steps).not.toContain('reconnecting')
+  })
+})
+
+describe('the base slots', () => {
+  it('reads the layout, the running slot and the stub going back to the previous base', () => {
+    expect(parseBaseSlots(new DataView(record(1, 0, 1, [2, 3, 1], [3, 1, 4]).buffer))).toEqual({ layout: 'two', running: 0, fellBack: true, confirmed: false,
+      slots: [{ generation: 2, whole: true, confirmed: true, tries: 1 }, { generation: 3, whole: true, confirmed: false, tries: 4 }] })
+    expect(parseBaseSlots(new DataView(record(0, 0xff, 0, [0, 0, 0], [0, 0, 0]).buffer))).toMatchObject({ layout: 'one', running: null })
+    expect(parseBaseSlots(new DataView(new ArrayBuffer(24)))).toBeNull() // before the base's first look
+    expect(() => parseBaseSlots(new DataView(new ArrayBuffer(12)))).toThrow()
+  })
+  it('says so on connect when the new base did not start and the previous one runs', async () => {
+    const unit = fakeUnit()
+    unit.slots = record(1, 0, 1, [2, 3, 1], [3, 1, 4])
+    const link = new OctatrackLink(unit.usb, fakeSession(unit), 300)
+    link.start(); await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+    expect(link.getState().notice).toMatchObject({ tone: 'error', text: expect.stringContaining('went back to its previous base') })
+    const quiet = fakeUnit(), other = new OctatrackLink(quiet.usb, fakeSession(quiet), 300) // a base before the slots stalls SLOTS
+    other.start(); await vi.waitFor(() => expect(other.getState().status).toBe('ready'))
+    expect(other.getState().notice).toBeUndefined()
   })
 })
 
@@ -632,4 +963,71 @@ it('uploads a capable base’s complete set once and accepts nothing before the 
     expect(staged).toHaveLength(2); expect(accept).toHaveBeenCalledTimes(1)
     expect(identity).toHaveBeenCalledTimes(2)
   } finally { stop(); identity.mockRestore() }
+})
+
+describe('several Elektron devices allowed on the site', () => {
+  // A pretend Digitakt or Syntakt: any Elektron product but the Octatrack, without the base's interface.
+  const other = (productName = 'Digitakt'): LinkDevice & { open: ReturnType<typeof vi.fn> } => ({
+    vendorId: 0x1935, productId: 0x7f, productName, opened: false,
+    configuration: { interfaces: [{ interfaceNumber: 0, alternates: [{ interfaceClass: 1, interfaceSubclass: 1, interfaceProtocol: 0, endpoints: [] }] }] },
+    open: vi.fn(async () => {}), async close() {}, async selectConfiguration() {}, async claimInterface() {}, async releaseInterface() {},
+    async controlTransferOut() { return { status: 'stall', bytesWritten: 0 } }, async controlTransferIn() { return { status: 'stall' } },
+  })
+  /** The fake unit's USB, listing `extra` before the unit and letting a test plug in any device. */
+  function usbWith(unit: ReturnType<typeof fakeUnit>, extra: LinkDevice[]) {
+    const connect = new Set<(event: { device: LinkDevice }) => void>()
+    const usb: LinkUsb = { ...unit.usb, async getDevices() { return [...extra, ...await unit.usb.getDevices()] },
+      addEventListener(type, listener) { unit.usb.addEventListener(type, listener); if (type === 'connect') connect.add(listener) },
+      removeEventListener(type, listener) { unit.usb.removeEventListener(type, listener); connect.delete(listener) } }
+    return { usb, plug: (device: LinkDevice) => { for (const listener of connect) listener({ device }) } }
+  }
+  it('ranks the base’s interface first, then an Octatrack by product id or name, and nothing else', async () => {
+    const [base] = await fakeUnit('base').usb.getDevices(), [stock] = await fakeUnit('stock').usb.getDevices()
+    expect([base, stock, other(), other('OCTATRACK MKII')].map(octatrackRank)).toEqual([2, 1, 0, 1])
+    expect(pickOctatrack([other(), stock, base])).toBe(base)
+    expect(pickOctatrack([other(), stock])).toBe(stock)
+    expect(pickOctatrack([other()])).toBeUndefined()
+  })
+  it('opens the Octatrack on the base when a Digitakt is listed first', async () => {
+    const unit = fakeUnit(), digitakt = other(), { usb } = usbWith(unit, [digitakt])
+    const link = new OctatrackLink(usb, fakeSession(unit), 300), stop = link.start()
+    await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+    expect(digitakt.open).not.toHaveBeenCalled()
+    stop()
+  })
+  it('does not call another Elektron device an Octatrack on the original OS', async () => {
+    const unit = fakeUnit('none'), digitakt = other(), { usb, plug } = usbWith(unit, [digitakt])
+    const link = new OctatrackLink(usb, fakeSession(unit), 300), stop = link.start()
+    await settle(); await settle()
+    plug(other('Syntakt')); await settle(); await settle()
+    expect(link.getState().status).toBe('idle')
+    expect(digitakt.open).not.toHaveBeenCalled()
+    stop()
+  })
+  it('stays on the unit when another Elektron device is plugged in while it is busy or on the original OS', async () => {
+    const busyUnit = fakeUnit(), busy = usbWith(busyUnit, [])
+    busyUnit.taken = true
+    const held = new OctatrackLink(busy.usb, fakeSession(busyUnit), 300), stopHeld = held.start()
+    await vi.waitFor(() => expect(held.getState().status).toBe('busy'))
+    const digitakt = other(); busy.plug(digitakt); await settle(); await settle()
+    expect(held.getState().status).toBe('busy'); expect(digitakt.open).not.toHaveBeenCalled()
+    const [stockUnit] = await fakeUnit('stock').usb.getDevices(), opened = vi.spyOn(stockUnit, 'open')
+    busy.plug(stockUnit); await settle(); await settle()
+    expect(opened).not.toHaveBeenCalled() // a stock Octatrack does not take over from one on the base
+    stopHeld()
+
+    const unit = fakeUnit('stock'), stock = usbWith(unit, [])
+    const link = new OctatrackLink(stock.usb, fakeSession(unit), 300), stop = link.start()
+    await vi.waitFor(() => expect(link.getState().status).toBe('stock'))
+    const syntakt = other('Syntakt'); stock.plug(syntakt); await settle(); await settle()
+    expect(link.getState().status).toBe('stock'); expect(syntakt.open).not.toHaveBeenCalled()
+    unit.plug('base') // a unit with the base does take over
+    await vi.waitFor(() => expect(link.getState().status).toBe('ready'))
+    stop()
+  })
+  it('lists only Octatracks in Chrome’s picker', async () => {
+    const unit = fakeUnit(), request = vi.spyOn(unit.usb, 'requestDevice'), link = new OctatrackLink(unit.usb, fakeSession(unit), 300)
+    await link.connect()
+    expect(request).toHaveBeenCalledWith({ filters: [{ vendorId: 0x1935, productId: 0x0002 }] })
+  })
 })

@@ -12,7 +12,8 @@
 #define RUNTIME_CAPABILITY_FLAGS 7u     /* CF sites, hash-backed stock copies, authored constant fills; and 128, site events, when the machine has them (64 is the volatile journal) */
 #define RUNTIME_HEADER_BYTES 80u        /* ABI 9 and 10: ABI 8 (76) plus requires u16, claim and hook-entry counts u8;
                                          * older headers: 76, 72, 68, 50, 32, 28 */
-#define RUNTIME_IMAGE_BYTES 131072u      /* one module's image and bss (Tape Echo's tone table is 86 KiB) */
+#define RUNTIME_IMAGE_BYTES 131072u      /* one module's image (Tape Echo's tone table is 86 KiB) */
+#define RUNTIME_MODULE_BYTES 294912u     /* one module's image and bss (MIDI Scenes' locks: 64 Parts of 4 KiB) */
 #define RUNTIME_RELOCATIONS 2048u
 #define RUNTIME_SITES 128u
 #define RUNTIME_SITE_BYTES 32u
@@ -91,7 +92,8 @@ struct runtime_dsp {
     const struct runtime_dsp_claim *claims;
     /* ABI 10: an engine instead of an effect (the package's slots 0): DSP words for the base's hook sites, at base 0,
      * each relocation an index (| 0x8000: the word holds a fixed P address, value - base; else an offset, value +
-     * base); count 0 here, so nothing takes it for an effect. Kept in its pool extent, as the claims are. */
+     * base); count 0 here, so nothing takes it for an effect. Kept in its pool extent, as the claims are. Its `cycles`
+     * and `kind` are its price per voice (never 0, executed or hardware), outside the controller digest. */
     uint32_t engine_count, init_count;  /* init_count: every init claim's words, in claim order (`initial`) */
     uint16_t engine_relocation_count;
     uint8_t entry_count, pad;
@@ -171,6 +173,7 @@ uint32_t modwerk_runtime_broken(void);               /* the first live module wh
 uint32_t modwerk_runtime_free(uint32_t *largest);    /* pool bytes free, and the largest free run */
 unsigned modwerk_runtime_list(uint8_t *out, unsigned first, unsigned most); /* INVENTORY: 4 + 24 x entries bytes */
 enum runtime_refusal modwerk_runtime_refusal(void);
+void modwerk_runtime_refused(enum runtime_refusal why); /* a machine check that refuses before the loader (Octatrack modset.c) */
 unsigned modwerk_runtime_refused_event(void);         /* after RUNTIME_EVENT: that event's hook index */
 #if RUNTIME_SITE_EVENTS
 /* Each site event's handlers in (order, module id) order, then 0: the base's dispatch (runtime_events.s,
@@ -223,6 +226,10 @@ enum runtime_metadata_operation { RUNTIME_METADATA_PREPARE=1, RUNTIME_METADATA_S
  * declaration and current/paused consumer checks. */
 int modwerk_machine_metadata_admit(const struct runtime_dsp *from, struct runtime_dsp *to,
     const struct runtime_context *,enum runtime_metadata_operation);
+/* Read-only format check of the reconstructed image, after relocations/copies/fills and before it receives an
+ * owner identity or can be published. Locked; no roots, retirement, DSP commands or admission side effects.
+ * image/page name reconstructed bytes; other arrays are still temporary. Default accepts. A runtime_refusal. */
+int modwerk_machine_image_validate(const struct runtime_dsp *);
 int modwerk_machine_dsp_admit(const struct runtime_dsp *from, struct runtime_dsp *to); /* may set to->id */
 /* 1 while a restore switches (an Undo, or the rollback after a failed self-test): it puts a position back as it was
  * before its change, so a machine may make a track that runs the outgoing module dry first (Octatrack, dsp.c). */

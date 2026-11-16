@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { USAGE_CONSENT_VERSION } from '../legal/policy'
+import { PAUSED_MODULE_IDS, isBetaModule } from '../catalog/availability'
 let usage: typeof import('./usage')
 let values: Map<string,string>
 let request: ReturnType<typeof vi.fn>
@@ -68,7 +69,7 @@ describe('optional usage reporting',()=>{
  })
  it('reports a completed firmware request and each unique available module with independent event IDs',()=>{
   usage.setUsageAllowed(true)
-  usage.trackFirmwareDownload(['miniverb','tapeecho','miniverb','spectrum','unknown'],'octatrack')
+  usage.trackFirmwareDownload(['miniverb','tapeecho','miniverb',PAUSED_MODULE_IDS.find(id=>!isBetaModule(id))!,'unknown'],'octatrack')
   expect(request).toHaveBeenCalledTimes(3)
   const bodies=request.mock.calls.map(([url,options])=>({url,options,body:JSON.parse(options.body)}))
   expect(bodies[0].body).toMatchObject({event:'firmware_download_requested',device:'octatrack'})
@@ -122,6 +123,13 @@ describe('optional usage reporting',()=>{
 })
 
 describe('page traffic privacy and navigation', () => {
+ it.each([false, true])('separates missing and unclassified pages without sending paths, opt-in=%s', optedIn => {
+  if (optedIn) usage.setUsageAllowed(true)
+  usage.trackPageView('new-screen/private-id?token=secret')
+  usage.trackPageView('missing/private-id?token=secret', true)
+  expect(request.mock.calls.map(([, options]) => JSON.parse(options.body).page)).toEqual(['unclassified', 'missing-page'])
+  for (const [, options] of request.mock.calls) expect(options.body).not.toMatch(/private|secret|token/)
+ })
  it.each([false, true])('sends only fixed page names with opt-in=%s', optedIn => {
   if (optedIn) usage.setUsageAllowed(true)
   for (const route of ['account/reset/private-token?email=private@example.test', 'forum/messages/private_username', 'forum/thread/private-id?search=secret', 'forum/profile/private_username', 'developer/private-report']) usage.trackPageView(route)

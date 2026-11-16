@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The Octatrack's events at base-owned stock sites, from events.json.
+"""The Octatrack's hooks at base-owned stock sites, from events.json.
 
     python3 -B sdk/machines/octatrack/events.py --check   # generated files are current
     python3 -B sdk/machines/octatrack/events.py --write   # regenerate them
 
 Generates the base's dispatch (elekloader/runtime_events.s), the loader's
 table header (elekloader/runtime_events.h), the SDK header modules include
-(include/modwerk_events.h), the reference table (EVENTS.md) and the hook
+(include/modwerk_events.h), the reference table (HOOKS.md) and the hook
 kinds the site checks packages against (site-events.json, read by
 src/engine/elekloader/module-set.ts). The base patches each site with a jmp to
 its dispatch; a runtime package subscribes (loader.h's hook words past
-RUNTIME_ENC, build.py) and never patches the site. An event with
+RUNTIME_ENC, build.py) and never patches the site. A hook with
 no site ("site": null) is raised by a module instead: it calls the base's
-modwerk_raise_<event>(), which runs every handler and returns their answers OR'd.
-Its package asks for the entry by the event's hook index (runtime.json "raise"): the
+modwerk_raise_<hook>(), which runs every handler and returns their answers OR'd.
+A raised hook with "after": a base-owned site at a stock routine's entry is raised
+by the base instead, when that routine returns: the site's tail keeps the caller's
+return address in modwerk_return_<site> and puts modwerk_after_<site> in its place,
+so the routine must not run twice at once.
+Its package asks for the entry by the hook's index (runtime.json "raise"): the
 loader writes the address into a zero word of its image at install, so no package is
 bound to one base build.
 
-Three kinds of entry (EVENTS.md): a `call` event (the default) runs C handlers at
-its site; a `take` event gives its site to one subscriber, whose detour-ABI entry
+Three kinds of hook (HOOKS.md): a `call` hook (the default) runs C handlers at
+its site; a `take` hook gives its site to one subscriber, whose detour-ABI entry
 runs with the site's registers (modules whose handlers replay stock themselves);
 a `table` has no site: modules contribute records (Elekloader's `contribute`) and
 base code reads them, in (order, module id) order. A table may own stock sites the
 base patches for its reader (the machine registry's chooser seams).
+
+The registry and this file keep their names (events.json, events.py, runtime_events.*,
+modwerk_events.h) until the next base build: the base's build_core.py and the loader's
+build.py, both inputs of the base identity, load them by those paths.
 """
 import argparse
 import json
@@ -37,9 +45,9 @@ FIRST = 4  # loader.h: RUNTIME_TICK, RUNTIME_DRAW, RUNTIME_KEY, RUNTIME_ENC come
 SAVED = 20  # d0-d1/a0-a2 the dispatch keeps for the stock continuation
 KINDS = ('call', 'take', 'table')
 REGISTERS = {'d0': 0, 'd1': 4, 'a0': 8, 'a1': 12, 'a2': 16}  # in the dispatch's saved frame
-ROOM = 16  # a take event's or table's subscribers, unless it says (call events: every module)
+ROOM = 16  # a take hook's or table's subscribers, unless it says (call hooks: every module)
 OUTPUTS = {'elekloader/runtime_events.s': 'asm', 'elekloader/runtime_events.h': 'loader',
-           'include/modwerk_events.h': 'sdk', 'EVENTS.md': 'markdown',
+           'include/modwerk_events.h': 'sdk', 'HOOKS.md': 'markdown',
            'site-events.json': 'browser'}
 
 
@@ -74,7 +82,10 @@ def load(path=REGISTRY):
             if e.get('length') or e['args'] or e['results'] != 'or' or not re.fullmatch('ev_[a-z0-9_]+', name) or room is not None:
                 raise ValueError('events.json: raised event %s needs the next hook index, no length, room or arguments, '
                                  'and results "or"' % name)
-            events.append(dict(e, kind=kind, site=None, length=0, room=None))
+            after = e.get('after')
+            if after is not None and (int(after, 16) not in sites or any(x.get('after') == int(after, 16) for x in events)):
+                raise ValueError('events.json: %s is raised after a declared site no other event is raised after' % name)
+            events.append(dict(e, kind=kind, site=None, length=0, room=None, after=after and int(after, 16)))
             continue
         if kind == 'table':
             if (e.get('site') is not None or not re.fullmatch('ot_[a-z0-9_]+', name) or type(e.get('record')) is not int
@@ -130,7 +141,12 @@ def index(name, registry=None):
 
 def raised(registry=None):
     """The events modules raise themselves: {event name: the base's entry symbol}."""
-    return {e['event']: 'modwerk_raise_' + e['event'] for e in (registry or load())['events'] if e['kind'] == 'call' and e['site'] is None}
+    return {e['event']: 'modwerk_raise_' + e['event'] for e in (registry or load())['events'] if by_modules(e)}
+
+
+def by_modules(e):
+    """A raised hook a module may raise: not one the base raises itself (after a stock routine returns, or on its own)."""
+    return e['kind'] == 'call' and e['site'] is None and not e.get('after') and not e.get('raisedByBase')
 
 
 def base_sites(registry=None):
@@ -239,22 +255,40 @@ def asm(reg):
             if s[action]:
                 out.append('.L%s_%s:\n        movem.l (%%sp),%%d0-%%d1/%%a0-%%a2\n        lea     %d(%%sp),%%sp\n' % (name, action, frame))
                 out += [_line(at, line) for line in s[action]]
-    for e in (e for e in reg['events'] if e['kind'] == 'call' and e['site'] is None):
-        k, loop, end = e['index'] - FIRST, '.Lraise_%s' % e['event'], '.Lraise_%s_end' % e['event']
-        out.append('\n| ---- raised by a module: %s: %s; every handler runs, the answers OR\'d\n'
+    raised = [e for e in reg['events'] if e['kind'] == 'call' and e['site'] is None]
+    for e in raised:  # one short entry each; the loop is shared, so a hook costs the base ten bytes
+        out.append('\n| ---- raised (by a module, or by the base): %s: %s; every handler runs, the answers OR\'d\n'
                    '        .globl  modwerk_raise_%s\nmodwerk_raise_%s:\n'
-                   '        lea     -8(%%sp),%%sp\n        movem.l %%d2/%%a2,(%%sp)\n        moveq   #0,%%d2\n'
-                   '        movea.l modwerk_runtime_event_row+%d,%%a2\n%s:\n        move.l  (%%a2)+,%%d0\n        beq     %s\n'
-                   '        movea.l %%d0,%%a0\n        jsr     (%%a0)\n        or.l    %%d0,%%d2\n        bra     %s\n'
-                   '%s:\n        move.l  %%d2,%%d0\n        movem.l (%%sp),%%d2/%%a2\n        lea     8(%%sp),%%sp\n        rts\n'
-                   % (e['event'], e['prototype'], e['event'], e['event'], 4 * k, loop, end, loop, end))
+                   '        lea     modwerk_runtime_event_row+%d,%%a0\n        bra.w   modwerk_raise_row\n'
+                   % (e['event'], e['prototype'], e['event'], e['event'], 4 * (e['index'] - FIRST)))
+    if raised:
+        out.append('\n| a0: the hook\'s row pointer. C convention: d0 the answers OR\'d, d2-d7/a2-a6 kept.\n'
+                   'modwerk_raise_row:\n        lea     -8(%sp),%sp\n        movem.l %d2/%a2,(%sp)\n        moveq   #0,%d2\n'
+                   '        movea.l (%a0),%a2\n.Lraise_next:\n        move.l  (%a2)+,%d0\n        beq     .Lraise_end\n'
+                   '        movea.l %d0,%a0\n        jsr     (%a0)\n        or.l    %d0,%d2\n        bra     .Lraise_next\n'
+                   '.Lraise_end:\n        move.l  %d2,%d0\n        movem.l (%sp),%d2/%a2\n        lea     8(%sp),%sp\n        rts\n')
+    after = [e for e in reg['events'] if e.get('after')]
+    for e in after:
+        at = '%08x' % e['after']
+        out.append('\n| ---- raised by the base when the routine at %#010x returns: %s\n'
+                   '        .globl  modwerk_after_%s\nmodwerk_after_%s:\n        move.l  modwerk_return_%s,-(%%sp)\n'
+                   '        pea     modwerk_runtime_event_row+%d\n        bra.w   modwerk_after_row\n'
+                   % (e['after'], e['event'], at, at, at, 4 * (e['index'] - FIRST)))
+    if after:
+        out.append('\n| (sp): the hook\'s row pointer, 4(sp): the routine\'s caller. d0-d1/a0-a1 reach it as the routine left them.\n'
+                   'modwerk_after_row:\n        lea     -16(%sp),%sp\n        movem.l %d0-%d1/%a0-%a1,(%sp)\n'
+                   '        movea.l 16(%sp),%a0\n        bsr.w   modwerk_raise_row\n'
+                   '        movem.l (%sp),%d0-%d1/%a0-%a1\n        lea     20(%sp),%sp\n        rts\n')
     out.append('modwerk_events_code_end:\n')
+    slots = ['modwerk_return_%08x' % e['after'] for e in reg['events'] if e.get('after')]
+    if slots:  # the callers' return addresses, one per wrapped routine
+        out.append('        .data\n        .balign 4\n' + ''.join('        .globl  %s\n%s: .long 0\n' % (x, x) for x in slots))
     return ''.join(out)
 
 
 def loader(reg):
     spans = ', '.join('{%#010xu, %du}' % (e['site'] or 0, e['length']) for e in reg['events'])  # raised and tables: no span
-    raised = [e for e in reg['events'] if e['kind'] == 'call' and e['site'] is None]
+    raised = [e for e in reg['events'] if by_modules(e)]
     raises = ', '.join('(uintptr_t)modwerk_raise_%s' % e['event'] if e in raised else '0' for e in reg['events'])
     names = ', '.join('%d %s' % (e['index'], e['event']) for e in reg['events'])
     rows, calls, words = [], 0, 0  # one flat row store: a call event a word per module, others their room
@@ -292,16 +326,16 @@ def loader(reg):
 def sdk(reg):
     out = ['/* SPDX-License-Identifier: GPL-3.0-or-later\n'
            ' * Generated by sdk/machines/octatrack/events.py from events.json: do not edit.\n'
-           ' * The Octatrack\'s events at stock sites the Modwerk base owns, and its tables\n'
-           ' * (EVENTS.md). Subscribe or contribute with a module\'s runtime.json; never patch\n'
-           ' * these sites. Call-event handlers use the C convention: arguments on the\n'
+           ' * The Octatrack\'s hooks at stock sites the Modwerk base owns, and its tables\n'
+           ' * (HOOKS.md). Subscribe or contribute with a module\'s runtime.json; never patch\n'
+           ' * these sites. Call-hook handlers use the C convention: arguments on the\n'
            ' * stack, d0-d1/a0-a1 free, everything else kept, the result in d0. */\n'
            '#ifndef MODWERK_EVENTS_H\n#define MODWERK_EVENTS_H\n#include <stdint.h>\n\n'
            '#define MODWERK_EV_PASS 0  /* the next handler, then stock */\n'
            '#define MODWERK_EV_DROP 1  /* ev_voice_bind: stock does nothing */\n'
            '#define MODWERK_EV_STOCK 2 /* ev_voice_bind: stock now, no later handler */\n']
     if any(e['kind'] == 'take' for e in reg['events']):
-        out.append('\n/* A take event\'s subscription names one of these. claims (C convention) 0: it takes every call;\n'
+        out.append('\n/* A take hook\'s subscription names one of these. claims (C convention) 0: it takes every call;\n'
                    ' * otherwise it takes the calls it returns nonzero for. entry: the code that gets the site, with every\n'
                    ' * register and the stack as there (it replays what the site held and returns to stock itself; a jsr\n'
                    ' * entry returns with rts); 0: stock runs at once and no later record is asked. */\n'
@@ -312,13 +346,13 @@ def sdk(reg):
                 e['event'], e['event'], e['when'], e['context'][0].upper() + e['context'][1:], e['contract'],
                 e['event'].upper(), e['index'], e['declaration']))
             continue
-        where = ('raised by a module' if e['site'] is None else
+        where = ('raised by the base' if e['site'] is None and (e.get('after') or e.get('raisedByBase')) else 'raised by a module' if e['site'] is None else
                  '%#010x' % e['site'] + (', take: subscribe a struct modwerk_take' if e['kind'] == 'take' else ''))
         out.append('\n/* %s (%s): %s. %s. %s */\n#define MODWERK_%s %d\n' % (
             e['event'], where, e['when'], e['context'][0].upper() + e['context'][1:], e['contract'], e['event'].upper(), e['index']))
         if e['kind'] == 'call':
             out.append('typedef %s;\n' % re.sub(r'^(\w+(?: \*)?)\s*f\(', r'\1 modwerk_%s(' % e['event'], e['prototype']))
-        if e['kind'] == 'call' and e['site'] is None:  # runtime.json "raise": the loader points this zero word of the image at the base's entry
+        if by_modules(e):  # runtime.json "raise": the loader points this zero word of the image at the base's entry
             out.append('/* Raise it: define `modwerk_%s *raise_%s` as a zero word in your image (initialized data, '
                        'not bss), list "%s" under "raise" in runtime.json and call through it; every handler\'s answer, OR\'d. */\n'
                        % (e['event'], e['event'], e['event']))
@@ -327,37 +361,41 @@ def sdk(reg):
 
 
 def markdown(reg):
-    out = ['# Octatrack events at base-owned stock sites\n\n'
+    out = ['# Octatrack hooks at base-owned stock sites\n\n'
            'Generated by `sdk/machines/octatrack/events.py` from `events.json`: edit the registry, then run\n'
            '`python3 -B sdk/machines/octatrack/events.py --write`.\n\n'
-           'The Modwerk base owns these stock sites and turns them into events, as Elekloader\'s core does for\n'
+           'The Modwerk base owns these stock sites and turns them into hooks, as Elekloader\'s core does for\n'
            '`ev_tick` and the others (rule 4: do not patch the shared sites, subscribe). A runtime package subscribes\n'
-           'with `{"event", "fn", "order"}` (a module\'s `runtime.json`, or `build.py --subscribe EVENT:FN:ORDER`);\n'
-           'the loader keeps each event\'s handlers in (order, module id) order and refuses any package that\n'
+           'with `{"event", "fn", "order"}` (a module\'s `runtime.json`, or `build.py --subscribe HOOK:FN:ORDER`);\n'
+           'the loader keeps each hook\'s handlers in (order, module id) order and refuses any package that\n'
            'patches one of these sites. Handlers use the C convention: arguments on the stack, d0-d1/a0-a1 free,\n'
            'everything else kept, the result in d0. C modules include `include/modwerk_events.h`.\n\n'
-           'A **take** event gives its site to one subscriber: its `fn` names a `struct modwerk_take` {claims, entry}.\n'
+           'A **take** hook gives its site to one subscriber: its `fn` names a `struct modwerk_take` {claims, entry}.\n'
            'The records are asked in order; the first whose `claims` is 0 or returns nonzero for the call gets the site:\n'
            'its `entry` runs with every register and the stack as at the site (code that replays what the site held and\n'
            'returns to stock itself, as a detour does; a `jsr` entry returns with rts past the site), or with `entry` 0\n'
            'stock runs at once. With no taker stock runs. A **table** has no site: modules contribute records\n'
            '(`{"to", "order", "data"}` in runtime.json, `data` a symbol of the record) and base code reads them in\n'
-           '(order, module id) order. Each event and table has a room: the loader refuses a package past it.\n\n'
-           '| event | kind | site | when | prototype or record | result | order | context |\n|---|---|---|---|---|---|---|---|\n']
+           '(order, module id) order. Each take hook and table has a room: the loader refuses a package past it.\n\n'
+           'The names `events.json`, `events.py`, `modwerk_events.h` and runtime.json\'s `"event"` key stay until the\n'
+           'next base build, which renames them; the base loads them by those paths.\n\n'
+           '| hook | kind | site | when | prototype or record | result | order | context |\n|---|---|---|---|---|---|---|---|\n']
     for e in reg['events']:
-        site = ('none' if e['kind'] != 'call' else 'none: a module calls the base\'s `modwerk_raise_%s` through a word the loader fills' % e['event']) if e['site'] is None else '%#010x' % e['site']
+        site = ('none' if e['kind'] != 'call' else 'none: the base raises it when the routine at %#010x returns' % e['after'] if e.get('after') else
+                'none: the base raises it' if e.get('raisedByBase') else
+                'none: a module calls the base\'s `modwerk_raise_%s` through a word the loader fills' % e['event']) if e['site'] is None else '%#010x' % e['site']
         proto = e['prototype'] if e['kind'] == 'call' else ('struct modwerk_take, %s entry, claims(%s)' % (e['entry'], e.get('arg') or 'nothing')
                                                             if e['kind'] == 'take' else '%d-byte record' % e['record'])
         out.append('| `%s` | %s | %s | %s | `%s` | %s | %s | %s |\n' % (
             e['event'], e['kind'], site, e['when'], proto, e['contract'], e['order'], e['context']))
-    out.append('\n## Reviewed subscribers\n\n| event | module | handler | order | what it does | evidence |\n|---|---|---|---|---|---|\n')
+    out.append('\n## Reviewed subscribers\n\n| hook | module | handler | order | what it does | evidence |\n|---|---|---|---|---|---|\n')
     for e in reg['events']:
         for s in e['subscribers']:
             out.append('| `%s` | %s | `%s` | %d | %s | %s |\n' % (e['event'], s['module'], s['fn'], s['order'], s['does'], s['evidence']))
     raisers = [(e, r) for e in reg['events'] for r in e.get('raisers', ())]
     if raisers:
-        out.append('\n## Reviewed raisers\n\nA raised event has no stock site: these modules call the base\'s entry and act on the answer.\n\n'
-                   '| event | module | where | what it does with the answer | evidence |\n|---|---|---|---|---|\n')
+        out.append('\n## Reviewed raisers\n\nA raised hook has no stock site: these modules call the base\'s entry and act on the answer.\n\n'
+                   '| hook | module | where | what it does with the answer | evidence |\n|---|---|---|---|---|\n')
         out += ['| `%s` | %s | `%s` | %s | %s |\n' % (e['event'], r['module'], r['fn'], r['does'], r['evidence']) for e, r in raisers]
     out.append('\n## Why this order\n\n')
     out += ['- `%s`: %s\n' % (e['event'], e['orderEvidence']) for e in reg['events']]
@@ -374,7 +412,7 @@ def markdown(reg):
 
 def browser(reg):
     """What the site checks of a package's hook words before it stages one (src/engine/elekloader/module-set.ts):
-    each word's kind by hook index, a take event's or table's room, a table's record size. No sites or guards."""
+    each word's kind by hook index, a take hook's or table's room, a table's record size. No sites or guards."""
     kinds = {'call': lambda e: 'raise' if e['site'] is None else 'call', 'take': lambda e: 'take', 'table': lambda e: 'table'}
     rows = []
     for e in reg['events']:

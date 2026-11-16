@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    "src/rate.c",
+    "src/audio.s"
+  ],
+  "defsym": {},
+  "cflags": [],
+  "weak": [],
+  "subscribe": [
+    {
+      "event": "ev_tick",
+      "fn": "sample_rate_tick",
+      "order": 50
+    },
+    {
+      "event": "ev_enc",
+      "fn": "sample_rate_turn",
+      "order": 50
+    }
+  ],
+  "contribute": [
+    {
+      "to": "core_params",
+      "order": 50,
+      "data": "00000000",
+      "relocs": [
+        [
+          0,
+          "abs32",
+          "sym:sample_rate_tun_param",
+          0
+        ]
+      ]
+    }
+  ],
+  "collections": {},
+  "copied": [],
+  "regions": [],
+  "claims": [
+    "param:FIN (id 40) is RATE: its names read RATE and its default is +63",
+    "param:TUN (id 39) turn and value text: fine in cents",
+    "screen:SAMPLE knob page (the SMPL key shows SMPL WAVEFORM only)",
+    "screen:SMPL WAVEFORM layout: one value row and a taller waveform"
+  ],
+  "requires": [],
+  "derive": null,
+  "releases": {
+    "1.74": {
+      "defsym": {
+        "sample_rate_stock_frames": "0x4011bf44",
+        "sample_rate_add_resume": "0x400a88f2",
+        "sample_rate_label_resume": "0x400d20f6",
+        "sample_rate_vt_sample": "0x401e3420"
+      },
+      "cflags": [
+        "-DPARAMS_EFF_AT=0x8000f7a8",
+        "-DVOICE_REC_AT=0x80005b30",
+        "-DVOICE_OWNER_AT=0x40291138",
+        "-DTRIG_NEXT_AT=0x8000586c",
+        "-DBRAIN_AT=0x419f28f8",
+        "-DVIEW_INVALIDATE_AT=0x40078580",
+        "-DFILLRECT_AT=0x40070726",
+        "-DPAGE_UPDATE_AT=0x400d253a"
+      ],
+      "sites": [
+        {
+          "addr": "0x4012112c",
+          "len": 6,
+          "stockSha256": "1d795c05a6f60518847adb3c8c3b315f746852ca7313b6b89ca22a1c51f829c0",
+          "op": "jsr",
+          "target": "sample_rate_block_gate"
+        },
+        {
+          "addr": "0x4011c644",
+          "len": 8,
+          "stockSha256": "0bd28d132775cde98fb671d54ef9598f4708ea45afaf5fd8638720d5eaf80031",
+          "op": "jsr",
+          "target": "sample_rate_fin_gate"
+        },
+        {
+          "addr": "0x4011c686",
+          "len": 6,
+          "stockSha256": "9d0e4936533326f7eee2789cd3c74ffc378f5663ee9fbf48ba9ee96a78e35bb0",
+          "op": "jsr",
+          "target": "sample_rate_scale_gate"
+        },
+        {
+          "addr": "0x400a88ea",
+          "len": 8,
+          "stockSha256": "2562fc04b5ba15cc5bf8909a85a59aa833d1e7e54127597742c740853b77bbc4",
+          "op": "jmp",
+          "target": "sample_rate_add_gate"
+        },
+        {
+          "addr": "0x400d20ee",
+          "len": 8,
+          "stockSha256": "23a165255925d4083c60ac1e20698da6cc67d4ef53254968ee15680ac74f63bd",
+          "op": "jmp",
+          "target": "sample_rate_label_gate"
+        },
+        {
+          "addr": "0x401c03c8",
+          "op": "bytes",
+          "len": 4,
+          "new": "00000001",
+          "kind": "data",
+          "stockSha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        },
+        {
+          "addr": "0x401c03f8",
+          "op": "bytes",
+          "len": 4,
+          "new": "00007f00",
+          "kind": "data",
+          "stockSha256": "413432a2e4977ca133f00f95e74dcb2af10220ee4bcf9c47ac33ed88a7d7bffa"
+        },
+        {
+          "addr": "0x401c0410",
+          "len": 4,
+          "stockSha256": "1f30203cdd9ad3c971fa8571e2480e7de4cfab7c58266b5f0f861ad6ed9fe773",
+          "op": "ptr",
+          "target": "sample_rate_long_text"
+        },
+        {
+          "addr": "0x401c0418",
+          "len": 4,
+          "stockSha256": "5925c177ed2362ea35a1c610f844e760f96a59dc073544a3ed640a17774eed36",
+          "op": "ptr",
+          "target": "sample_rate_short_text"
+        }
+      ]
+    }
+  },
+  "storage": []
+}

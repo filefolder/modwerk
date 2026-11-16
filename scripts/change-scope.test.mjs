@@ -4,7 +4,8 @@ import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync, rmSync,
 import { tmpdir } from 'node:os'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { classifyChanges, isVersionNeutralChange, readChangeScope } from './change-scope.mjs'
+import { classifyChanges, isVersionNeutralChange, reachesSdkSuite, readChangeScope } from './change-scope.mjs'
+import { moduleFolders } from './machine-folders.mjs'
 
 const digi = { id: 'demo', machine: 'digitakt', version: '1.0.0', name: 'Demo', author: { github: 'author' }, maintainers: ['author'],
   source: { revision: 'a'.repeat(40) }, platform: { build: 'build.json' }, compatibility: { releases: ['1.53'] }, claims: {},
@@ -19,10 +20,13 @@ describe('documentation and firmware scheduling', () => {
   it.each(['scripts/frontend-mcp.mjs', 'scripts/frontend-mcp-private-host.mjs', 'sdk/tests/test_frontend_mcp_host.py'])('checks actual native Windows MCP refusal for %s without firmware compilation', path => {
     expect(scope(change(path))).toMatchObject({ documentation: false, windows: true, modules: false, elemod: false })
   })
+  it.each(['scripts/modules.mjs', 'scripts/module-cpu-price.mjs', 'scripts/machine-modules.mjs', 'scripts/module-qualification.mjs'])('runs the Windows module path check for %s, which modules:check runs', path => {
+    expect(scope(change(path))).toMatchObject({ windows: true })
+  })
   it.each(['scripts/prepare-runtime-spans.py', 'scripts/runtime_private_paths.py', 'sdk/tests/test_runtime_spans.py'])('runs native Windows privacy checks for %s without firmware compilation', path => {
     expect(scope(change(path))).toMatchObject({ documentation: false, windows: true, modules: false, elemod: false })
   })
-  it.each(['octabam', 'digitakt', 'digitone', 'analog-rytm-mkii'])('skips firmware and app checks for %s prose, screenshots and evidence', machine => {
+  it.each(moduleFolders())('skips firmware and app checks for %s prose, screenshots and evidence', machine => {
     const actual = scope(...['README.md', 'media/control.png', 'media/capture.json', 'presentation/thumbnail.svg', 'evidence/report.json'].map(path => change(`sdk/${machine}/modules/demo/${path}`)))
     expect(actual).toEqual({ documentation: true, modules: false, elemod: false, windows: false, worker: false, logger: false })
   })
@@ -56,8 +60,13 @@ describe('documentation and firmware scheduling', () => {
     expect(actual.modules).toBe(false)
     expect(actual.documentation).toBe(false)
   })
-  it.each(['src/demo.s', 'build.json', 'include/demo.inc'])('compiles Analog Rytm MKII firmware input %s', path => {
-    const actual = scope(change('sdk/analog-rytm-mkii/modules/demo/' + path))
+  it('deploys the Worker for a Zoom module manifest, which its module list bundles, and compiles nothing', () => {
+    const zoom = { ...digi, machine: 'zoom-ms-70cdr' }, path = 'sdk/zoom/modules/demo/modwerk.module.json'
+    expect(scope(change(path, zoom, { ...zoom, version: '1.0.1', presentation: { summary: 'New summary' } }))).toMatchObject({ worker: true, elemod: false, modules: false })
+    expect(scope(change(path, null, zoom)).worker).toBe(true)
+  })
+  it.each(moduleFolders('elemod').flatMap(machine => ['src/demo.s', 'build.json', 'include/demo.inc'].map(path => [machine, path])))('compiles %s firmware input %s', (machine, path) => {
+    const actual = scope(change(`sdk/${machine}/modules/demo/` + path))
     expect(actual.elemod).toBe(true)
     expect(actual.modules).toBe(false)
     expect(actual.documentation).toBe(false)
@@ -75,7 +84,7 @@ describe('documentation and firmware scheduling', () => {
     expect(() => scope(change(modulePath, '{}', '{'))).toThrow()
   })
   it('preserves OT compiler identity and isolates app/backend edits from firmware compilation', () => {
-    const path = 'sdk/octabam/modules/demo/octamod.module.json'
+    const path = 'sdk/octatrack/modules/demo/octamod.module.json'
     expect(scope(change(path, ot, { ...ot, presentation: { summary: 'Words' } })).modules).toBe(false)
     expect(scope(change(path, ot, { ...ot, version: '1.0.1' })).modules).toBe(true)
     for (const path of ['src/App.tsx', 'server/api.ts', 'AGENTS.md', 'scripts/change-scope.mjs']) {
@@ -145,7 +154,44 @@ describe('documentation and firmware scheduling', () => {
       git('add', '.'); git('commit', '-m', 'code')
       const code = git('rev-parse', 'HEAD'); rmSync(resolve(root, 'sdk/digitakt/modules/demo/src/demo.c'))
       expect(readChangeScope({ root, base: code }).elemod).toBe(true)
+      expect(readChangeScope({ root, base: code }).base).toBe(false)
+      mkdirSync(resolve(root, 'sdk/machines/octatrack'), { recursive: true }); writeFileSync(resolve(root, 'sdk/machines/octatrack/base-binding.json'), '{}')
+      expect(readChangeScope({ root, base: code }).base).toBe(true)
       expect(() => readChangeScope({ root, base: 'missing-ref' })).toThrow()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})
+
+describe('SDK suite reach', () => {
+  it.each(['src/components/ModuleCard.tsx', 'src/community/Forum.tsx', 'src/hooks/useSheetFocus.ts', 'src/App.tsx', 'src/styles.css',
+    'src/routing.test.ts', 'server/community/routes.ts', 'worker.ts', 'changelog/2026-10-26-forum.md', 'docs/APP_DEVELOPMENT.md'])('skips the SDK suite locally for %s', path => {
+    expect(reachesSdkSuite(path)).toBe(false)
+  })
+  it.each(['sdk/tests/test_base_bound.py', 'src/engine/rom-package.ts', 'src/catalog/modules.ts', 'src/config/usb-audio.ts',
+    'src/community/module-changelogs.json', 'src/community/module-release-notes.ts', 'src/routing.ts', 'scripts/module-pairs.py',
+    'public/octatrack-modules/euclid/0.1.4-experimental.mwrm', 'docs/media/startup/verification.json', 'package-lock.json'])('runs the SDK suite for %s', path => {
+    expect(reachesSdkSuite(path)).toBe(true)
+  })
+  it('runs it for every site path the suite itself names', () => {
+    const files = execFileSync('git', ['ls-files', '-z', '--', 'sdk', 'scripts/*.py', 'scripts/octatrack-module-page.mjs', 'scripts/sdk-imports.mjs'], { cwd: repository, encoding: 'utf8' })
+      .split('\0').filter(path => /\.(py|sh|mjs|cpp|c|h)$/.test(path))
+    const named = files.flatMap(path => [...readFileSync(resolve(repository, path), 'utf8').matchAll(/(?<![\w./-])(?:src|server|changelog)\/[\w./-]+|(?<![\w./-])worker\.ts\b/g)].map(match => match[0]))
+    expect(named.length).toBeGreaterThan(0)
+    expect([...new Set(named)].filter(path => !reachesSdkSuite(path))).toEqual([])
+  })
+  it('reports the reach of local edits and runs the suite when nothing changed', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'modwerk-scope.'))
+    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    try {
+      git('init'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com')
+      mkdirSync(resolve(root, 'src/components'), { recursive: true }); mkdirSync(resolve(root, 'sdk/tests'), { recursive: true })
+      writeFileSync(resolve(root, 'src/components/Card.tsx'), 'old'); git('add', '.'); git('commit', '-m', 'base')
+      const base = git('rev-parse', 'HEAD')
+      expect(readChangeScope({ root, base }).sdk).toBe(true)
+      writeFileSync(resolve(root, 'src/components/Card.tsx'), 'new')
+      expect(readChangeScope({ root, base }).sdk).toBe(false)
+      writeFileSync(resolve(root, 'sdk/tests/test_new.py'), 'untracked')
+      expect(readChangeScope({ root, base }).sdk).toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 })
@@ -160,6 +206,18 @@ describe('module version rule', () => {
     expect(isVersionNeutralChange(change(modulePath, flagged, { ...flagged, compatibility: { ...flagged.compatibility, releases: ['1.53', '1.54'] } }))).toBe(false)
     expect(isVersionNeutralChange(change(modulePath, flagged, { ...flagged, platform: { build: 'other.json' } }))).toBe(false)
     expect(isVersionNeutralChange(change('sdk/digitakt/modules/demo/src/demo.c'))).toBe(false)
+  })
+  it('needs no new version for a new display name or author credit', () => {
+    const credited = { ...digi, license: { spdx: 'MIT', file: 'LICENSE', declaration: 'Original code by author.' } }
+    const renamed = { ...credited, name: 'Demo Two', author: { github: 'author', name: 'Author Name', credits: ['Author Name: the module.'] },
+      license: { ...credited.license, declaration: 'Original code by Author Name (@author).' } }
+    expect(isVersionNeutralChange(change(modulePath, credited, renamed))).toBe(true)
+  })
+  it('still needs one for a new author login, maintainer or licence', () => {
+    const credited = { ...digi, license: { spdx: 'MIT', file: 'LICENSE', declaration: 'Original code by author.' } }
+    expect(isVersionNeutralChange(change(modulePath, credited, { ...credited, author: { github: 'other' } }))).toBe(false)
+    expect(isVersionNeutralChange(change(modulePath, credited, { ...credited, maintainers: ['author', 'other'] }))).toBe(false)
+    expect(isVersionNeutralChange(change(modulePath, credited, { ...credited, license: { ...credited.license, spdx: 'GPL-3.0-only' } }))).toBe(false)
   })
 })
 

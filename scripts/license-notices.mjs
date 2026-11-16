@@ -10,7 +10,7 @@ export async function renderPlatformNotices(root) {
   const elastic = (await readFile(resolve(root, 'LICENSES/Elastic-2.0.txt'), 'utf8')).trimEnd()
   const gpl = (await readFile(resolve(root, 'LICENSES/GPL-3.0-or-later.txt'), 'utf8')).trimEnd()
   const manifest = JSON.parse(await readFile(resolve(root, 'LICENSES/platform.json'), 'utf8'))
-  return [scope, 'Shared helpers (GPL-3.0-or-later OR Elastic-2.0):', ...manifest.sharedFiles,
+  return [scope, 'Pipeline files (Elastic-2.0):', ...manifest.pipelineFiles, '', 'Shared helpers (GPL-3.0-or-later OR Elastic-2.0):', ...manifest.sharedFiles,
     '', 'Full Elastic License 2.0 terms:', elastic, '', 'Full GPL-3.0-or-later terms:', gpl].join('\n') + '\n'
 }
 
@@ -34,7 +34,7 @@ export async function renderLicenseNotices(root) {
     sections.push([component.name, 'SPDX: ' + component.spdx, 'Used in: ' + component.usedIn.join('; '), ...component.sources.map(source => 'Notice source: ' + (source.url ?? source.path)), '', notice].join('\n'))
   }
   for (const [id, components] of Object.entries(manifest.moduleComponents)) {
-    const moduleFolder = resolve(root, 'sdk/octabam/modules', id)
+    const moduleFolder = resolve(root, 'sdk/octatrack/modules', id)
     const document = JSON.parse(await readFile(resolve(moduleFolder, 'octamod.module.json'), 'utf8'))
     const terms = (await readFile(resolve(moduleFolder, document.license.file), 'utf8')).trimEnd()
     const expectedSpdx = ['MIT', ...components.map(component => {

@@ -56,6 +56,11 @@ uint32_t modwerk_dsp_source_charge(unsigned core)
     for (unsigned t = 0; t < 8u; ++t) if (source_core(t) == core) sum += source_voice[t];
     return sum;
 }
+/* The last claim refused for cycles: the core and the cycles it asked for (its voice and any engine it adds), for the
+ * DSP FULL box (status.c). A machine's voice has no effect pick to show a refusal, so the box says it. */
+static unsigned refused_core;
+static uint32_t refused_add;
+void modwerk_dsp_source_refusal(unsigned *core, uint32_t *add) { *core = refused_core, *add = refused_add; }
 /* `module` (its runtime id) renders `track`, replacing whatever claimed it; nothing changes unless the core's sources,
  * this voice, the module's engine and every slot fit its allowance. */
 int modwerk_dsp_source_claim(unsigned track, uint32_t module, uint32_t voice, uint32_t engine, uint8_t kind)
@@ -70,7 +75,7 @@ int modwerk_dsp_source_claim(unsigned track, uint32_t module, uint32_t voice, ui
     uint32_t v = charged(voice, kind), e = charged(engine, kind), old = source_engine[c][at].module ? source_engine[c][at].cycles : 0;
     uint32_t keep = old > e ? old : e;
     uint32_t total = slot_charge(c) + modwerk_dsp_source_charge(c) - source_voice[track] - old + v + keep;
-    if (total > (c ? MODWERK_DSP_ALLOWANCE1 : MODWERK_DSP_ALLOWANCE0)) return RUNTIME_CYCLES;
+    if (total > (c ? MODWERK_DSP_ALLOWANCE1 : MODWERK_DSP_ALLOWANCE0)) { refused_core = c, refused_add = v + keep - old; return RUNTIME_CYCLES; }
     source_voice[track] = v, source_owner[track] = module;
     source_engine[c][at].module = module, source_engine[c][at].cycles = keep;
     return RUNTIME_OK;
@@ -102,6 +107,10 @@ void dl_residency_nudge(void);
  * words at the head of the FX2 block (Octabam dsp_ranges.py); a module there shares them as stock's reverbs do. */
 #define FX1_BUFFER 3072u
 #define FX2_BUFFER 16384u
+/* The receiver's packet operations sit at the top of each core's FX2 block 3 (dsp_loader.py WINDOW): a buffer that
+ * reaches past this many words is "wide" (catalog byte 2) and buffers.c keeps it out of that block. */
+#define WINDOW_TAIL 0x3e00u
+#define BUFFER_READS(d) ((d)->buffer ? ((d)->buffer > WINDOW_TAIL ? 2u : 1u) : 0u)
 
 #ifdef MODWERK_HOST
 uint8_t modwerk_test_live_fx[16], *modwerk_test_bank;
@@ -144,7 +153,7 @@ static char owner_name[MODWERK_FX_IDS][16];
 static uint8_t *owner_page[MODWERK_FX_IDS]; /* its page recipe (the module image's head), and that image's length */
 static uint32_t owner_page_bytes[MODWERK_FX_IDS];
 static uint8_t owner_pinned[MODWERK_FX_IDS]; /* its ColdFire code names this id: it never moves (loader.h) */
-static uint32_t owner_cycles[MODWERK_FX_IDS]; /* an instance's chip cycles a sample, unfloored (status.c's MODULE LOAD) */
+static uint32_t owner_cycles[MODWERK_FX_IDS]; /* an instance's chip cycles a sample, unfloored (status.c's MODULE COST) */
 /* Each slot's least charge: the dearest stock effect this bank's Parts name there, working or saved, the one it runs and
  * the one `ids` asks for. A module id counts nothing here: each module is admitted for itself, and a Part naming one
  * that does not fit is refused at the switch. */
@@ -187,8 +196,14 @@ static const uint8_t no_target[16] = {255, 255, 255, 255, 255, 255, 255, 255, 25
 unsigned modwerk_dsp_slot_floors(const uint8_t ids[16], uint32_t least[16])
 {
     uint32_t was[16];
-    floors(no_target, was), floors(ids, least);
-    for (unsigned c = 0; c < 2u; ++c) {
+    unsigned raised = 0;
+    floors(no_target, was); /* the Parts once: the target only adds its own stock effects */
+    for (unsigned i = 0; i < 16u; ++i) {
+        unsigned p = ids[i];
+        uint32_t x = p < MODWERK_FX_IDS && !owner[p] ? dl_catalog[p].cycles : 0u;
+        least[i] = x > was[i] ? x : was[i], raised |= least[i] > was[i];
+    }
+    for (unsigned c = 0; raised && c < 2u; ++c) {
         uint32_t voices = modwerk_dsp_source_charge(c), after = bank_booking(least, c) + voices;
         if (after > (c ? MODWERK_DSP_ALLOWANCE1 : MODWERK_DSP_ALLOWANCE0) && after > bank_booking(was, c) + voices) return 1u + c;
     }
@@ -291,7 +306,7 @@ static void catalogue_stamp(const struct runtime_dsp *d,uint8_t *out)
 /* Shared scalar publication, without a page, map write or manager nudge. */
 static void __attribute__((noinline)) catalogue_install(const struct runtime_dsp *to,uint32_t generation)
 {
-    dl_catalog[to->id] = (struct dl_package){(uint16_t)to->count, 1, chip_cycles(to), to->slots, 0, 1, to->buffer != 0};
+    dl_catalog[to->id] = (struct dl_package){(uint16_t)to->count, 1, chip_cycles(to), to->slots, 0, 1, BUFFER_READS(to)};
     dl_codes[0][to->id] = dl_codes[1][to->id] =
         (struct code){to->words, to->relocations, (uint16_t)to->count, to->init, to->proc, to->relocation_count};
     owner[to->id] = to->module, owner_layout[to->id] = to->layout, owner_pinned[to->id] = to->pinned;
@@ -387,7 +402,7 @@ static int checked_catalogue(const struct runtime_owner *o,const struct runtime_
        owner_cycles[id]!=cycles || owner_measured[id]!=(d->kind==RUNTIME_HARDWARE) ||
        !same_bytes((const uint8_t *)owner_name[id],(const uint8_t *)d->name,16u) || owner_page[id]!=d->page || owner_page_bytes[id]!=d->page_bytes ||
        p->words!=d->count || p->alignment!=1u || p->cycles!=cycles ||
-       p->slots!=d->slots || p->resident || !p->qualified || p->buffer!=(d->buffer!=0)) return 0;
+       p->slots!=d->slots || p->resident || !p->qualified || p->buffer!=BUFFER_READS(d)) return 0;
     for(unsigned c=0;c<2u;++c) { const struct code *k=&dl_codes[c][id];
         if(k->words!=d->words || k->relocations!=d->relocations || k->count!=d->count || k->init!=d->init || k->proc!=d->proc || k->relocation_count!=d->relocation_count) return 0; }
     return modwerk_fxpage_current((unsigned)id,d->page,d->page_bytes,d->slots) && modwerk_fxmap_current((unsigned)id,module,d->layout,d->name);
@@ -544,7 +559,7 @@ int modwerk_dsp_bank_names(unsigned id)
     return named;
 }
 
-/* MODULE LOAD (status.c): each installed module effect, by handle: its name, an instance's chip cycles a sample
+/* MODULE COST (status.c): each installed module effect, by handle: its name, an instance's chip cycles a sample
  * (unfloored: what it costs, not the ledger's charge), whether that is a hardware figure, and how many slots run it
  * on each core (T1-T4 core 1, T5-T8 core 0). Returns how many it wrote, at most MODWERK_FX_IDS. */
 unsigned modwerk_dsp_module_loads(struct modwerk_module_load *out)
@@ -614,6 +629,29 @@ fx_set modwerk_dsp_dry(void)
  * LOAD_HOLD ticks (about a minute), in case one never ends. */
 #define LOAD_HOLD 3600u
 static unsigned last_track = 0xffu, load_held;
+int modwerk_fxmap_describe(unsigned id, uint32_t *module, uint16_t *layout, char *name); /* fxmap.c */
+#ifndef MODWERK_HOST
+/* machine_registry.c's map of the machines a project uses; a base without the registry has none. */
+__attribute__((weak)) int modwerk_machine_absent(unsigned k, uint32_t *module, char *name) { (void)k, (void)module, (void)name; return 0; }
+__attribute__((weak)) int modwerk_machine_track_absent(unsigned t, uint32_t *module, char *name) { (void)t, (void)module, (void)name; return 0; }
+#endif
+/* The track's machine, when the project's machine map names it and it is absent: "POLY8 IS OFF" when it is switched
+ * off on MODULES, else "MISSING POLY8" (owner, 16 November 2026: machines in the project map). */
+static int machine_notice(unsigned track, char *text)
+{
+    uint32_t module = 0;
+    char name[16];
+    if (track >= 8u || !modwerk_machine_track_absent(track, &module, name)) return 0;
+    int off = modwerk_modset_is_off(module);
+    unsigned n = 0;
+    if (!off) for (const char *t = "MISSING "; *t; ) text[n++] = *t++;
+    unsigned at = n;
+    for (unsigned i = 0; i < 15u && name[i]; ++i) text[n++] = name[i] >= 'a' && name[i] <= 'z' ? (char)(name[i] - 32) : name[i];
+    if (n == at) for (const char *t = "MACHINE"; *t; ) text[n++] = *t++;
+    if (off) for (const char *t = " IS OFF"; *t; ) text[n++] = *t++;
+    text[n] = 0;
+    return 1;
+}
 int modwerk_dsp_missing_tick(int following, unsigned track, char *text)
 {
     if (!modwerk_fxmap_loading()) load_held = 0;
@@ -622,9 +660,21 @@ int modwerk_dsp_missing_tick(int following, unsigned track, char *text)
     last_track = track;
     fx_set say = {{0}};
     if (track < 8u) say = fx_and(modwerk_dsp_dry(), fx_with(fx_with(say, LIVE_FX[track]), LIVE_FX[8u + track]));
-    if (!fx_any(say)) return 0;
+    if (!fx_any(say)) return machine_notice(track, text);
     unsigned k = 0;
     while (!fx_in(say, k)) ++k;
+    /* A module switched off on PROJ > MODWERK > MODULES is not missing: "E-VERB IS OFF" (owner, 16 November 2026). */
+    uint32_t module = 0;
+    uint16_t layout;
+    char name[16];
+    if (modwerk_fxmap_describe(k, &module, &layout, name) && modwerk_modset_is_off(module)) {
+        unsigned n = 0;
+        for (; n < 15u && name[n]; ++n) text[n] = name[n] >= 'a' && name[n] <= 'z' ? (char)(name[n] - 32) : name[n];
+        if (!n) for (const char *t = "MODULE"; *t; ) text[n++] = *t++;
+        for (const char *t = " IS OFF"; *t; ) text[n++] = *t++;
+        text[n] = 0;
+        return 1;
+    }
     for (unsigned i = 0; i < 8u; ++i) text[i] = "MISSING "[i];
     modwerk_fxmap_name(k, text + 8);
     for (char *c = text + 8; *c; ++c) if (*c >= 'a' && *c <= 'z') *c = (char)(*c - 32); /* the popup sizes capitals only */
@@ -648,6 +698,17 @@ unsigned modwerk_dsp_missing_list(uint8_t *out, unsigned first, unsigned most)
         if (seen++ < first) continue;
         uint8_t *e = out + 4u + 24u * n++;
         e[0] = (uint8_t)k, e[1] = 0, e[2] = (uint8_t)(layout >> 8), e[3] = (uint8_t)layout;
+        for (unsigned i = 0; i < 4u; ++i) e[4 + i] = (uint8_t)(module >> (24 - 8 * i));
+        for (unsigned i = 0; i < 16u; ++i) e[8 + i] = (uint8_t)name[i];
+    }
+    /* Then the machines the project uses that are absent (machine_registry.c's map): handle 0xff, 0x80 and the entry. */
+    for (unsigned k = 0; k < MODWERK_MACHINE_MAP && n < most; ++k) {
+        uint32_t module;
+        char name[16];
+        if (!modwerk_machine_absent(k, &module, name)) continue;
+        if (seen++ < first) continue;
+        uint8_t *e = out + 4u + 24u * n++;
+        e[0] = 0xffu, e[1] = (uint8_t)(0x80u | k), e[2] = e[3] = 0;
         for (unsigned i = 0; i < 4u; ++i) e[4 + i] = (uint8_t)(module >> (24 - 8 * i));
         for (unsigned i = 0; i < 16u; ++i) e[8 + i] = (uint8_t)name[i];
     }
@@ -682,8 +743,8 @@ unsigned modwerk_dsp_flags(unsigned core)
 #define STALL_TICKS 30u
 static uint32_t seen_frames, still;
 int modwerk_dsp_stalled(uint32_t frames, int busy)
-{
-    if (frames != seen_frames || !busy) { seen_frames = frames; still = 0; return 0; }
+{   /* not while the frames stand on purpose: a base write's OS UPGRADE quiesce (flash.c), stock's USB DISK MODE (finding 72) */
+    extern volatile uint32_t modwerk_flash_quiesced; int modwerk_machine_usb_disk(void); if (frames != seen_frames || !busy || modwerk_flash_quiesced || modwerk_machine_usb_disk()) { seen_frames = frames; still = 0; return 0; }
     return ++still == STALL_TICKS;
 }
 volatile uint32_t modwerk_dsp_stalls, modwerk_dsp_drained; /* hangs seen; words taken back from the DSPs */
@@ -912,6 +973,7 @@ volatile uint32_t modwerk_test_playing;
 int dl_bound(unsigned core, unsigned id);           /* manager.c (build_core.py's edit): a slot there runs bound code */
 extern volatile uint8_t dl_intended_override[16];   /* manager.c (build_core.py's edit): what a parked slot waits for */
 unsigned modwerk_runtime_intact(void);              /* loader.c: live modules whose sites hold */
+extern volatile uint32_t dl_residency_enabled;      /* manager.c: 0 once a stall shut the loader off (recover) */
 extern volatile uint32_t modwerk_status[];          /* status.c: [0] the CPU, [2] the T5-8 peak, [4] the T1-4 peak */
 extern volatile uint32_t modwerk_status_reads, modwerk_status_fast; /* status.c: meter windows read; peaks only */
 extern volatile uint32_t dl_residency_rollbacks, dl_residency_failures;
@@ -974,8 +1036,70 @@ static unsigned st_queued, st_deferred, st_used, st_try, st_slot, st_back, st_ba
 static uint32_t st_counted, st_frames, st_failures, st_reads;
 volatile uint32_t modwerk_selftest_key;
 void modwerk_post_key(unsigned code, int pressed); /* boot.c: through the panel's byte ringer */
+void modwerk_panel_bytes(uint8_t first, uint8_t second);
+/* Remote keys (the self-test's, a development base's USB keys) wait for a whole physical report (#1110). The panel
+ * sends two-byte reports through the same ringer, and its parser takes the byte after a header as that report's
+ * value: a remote report rung between a fader's header and its value gave the fader the remote header and read the
+ * fader's value as key rows (TRIG5-7 held, a FUNC release lost). So one is rung only when the ringer holds nothing
+ * and the parser expects a header, and only from the tick, a task: an interrupt above the parser's could see that
+ * state in the middle of its run. */
+#ifdef MODWERK_HOST
+uint32_t modwerk_test_panel_count;
+uint8_t modwerk_test_panel_header = 1;
+#define PANEL_COUNT modwerk_test_panel_count
+#define PANEL_HEADER modwerk_test_panel_header
+#else
+#define PANEL_COUNT (*(volatile uint32_t *)0x460ffda0u) /* bytes rung that the parser has not taken */
+#define PANEL_HEADER (*(volatile uint8_t *)0x400d16b8u) /* nonzero: its next byte starts a report */
+#endif
 static uint8_t st_lanes[8][72];
-static void press(unsigned code) { modwerk_selftest_key = code + 1u; modwerk_post_key(code, 1); modwerk_post_key(code, 0); }
+/* A key pressed and let go; 0 while the panel is in the middle of a report: the self-test asks again next tick. */
+static int press(unsigned code)
+{
+    uint32_t sr = modwerk_machine_mask();
+    int whole = !PANEL_COUNT && PANEL_HEADER;
+    if (whole) modwerk_selftest_key = code + 1u, modwerk_post_key(code, 1), modwerk_post_key(code, 0);
+    modwerk_machine_unmask(sr);
+    return whole;
+}
+#if defined(MODWERK_DEV) || defined(MODWERK_HOST)
+/* A development base's USB keys come from the USB interrupt, so they queue for the tick. A key whose row another key
+ * of this pass already changed waits a tick: the rows it is built from (boot.c) change once the parser has run. */
+#define REMOTE_KEYS 16u
+static volatile uint8_t remote[REMOTE_KEYS][3]; /* 1, code, pressed; or 0 and a report's two bytes */
+static volatile uint32_t remote_in, remote_out;
+static int remote_put(unsigned key, unsigned a, unsigned b)
+{
+    uint32_t sr = modwerk_machine_mask();
+    int room = remote_in - remote_out < REMOTE_KEYS;
+    if (room) {
+        volatile uint8_t *e = remote[remote_in % REMOTE_KEYS];
+        e[0] = (uint8_t)key, e[1] = (uint8_t)a, e[2] = (uint8_t)b;
+        remote_in = remote_in + 1;
+    }
+    modwerk_machine_unmask(sr);
+    return room;
+}
+int modwerk_remote_key(unsigned code, int pressed) { return code < 64u && remote_put(1, code, pressed != 0); }
+int modwerk_remote_bytes(uint8_t first, uint8_t second) { return remote_put(0, first, second); }
+static void remote_tick(void)
+{
+    uint8_t changed[8] = {0}; /* per key row: 1 + the key this pass changed there */
+    uint32_t sr = modwerk_machine_mask();
+    if (!PANEL_COUNT && PANEL_HEADER)
+        for (unsigned n = 0; n < 8u && remote_out != remote_in; ++n) { /* 16 of the ringer's 32 bytes at most */
+            volatile uint8_t *e = remote[remote_out % REMOTE_KEYS];
+            if (e[0]) {
+                unsigned row = e[1] >> 3;
+                if (changed[row] && changed[row] != e[1] + 1u) break;
+                changed[row] = (uint8_t)(e[1] + 1u);
+                modwerk_post_key(e[1], e[2]);
+            } else modwerk_panel_bytes(e[1], e[2]);
+            remote_out = remote_out + 1;
+        }
+    modwerk_machine_unmask(sr);
+}
+#endif
 /* The FX lane bytes of track t: page 1 FX1 18-23, FX2 24-29; page 2 FX1 0x32-0x37, FX2 0x38-0x3d. */
 static int fx_lane_byte(unsigned b) { return (b >= 18u && b < 30u) || (b >= 0x32u && b < 0x3eu); }
 static unsigned triangle(unsigned x) { x &= 255u; return x < 128u ? x : 255u - x; }
@@ -999,12 +1123,24 @@ static void restore_lanes(void)
 static int st_played;
 static uint32_t counted(void) { return modwerk_dsp_stalls + dl_rejected[0] + dl_rejected[1] + dl_errors + dl_residency_rollbacks; }
 static unsigned core_of_slot(unsigned i) { return (i & 7u) < 4u ? 1u : 0u; }
-static int settled(const uint8_t *want) /* the manager idle, and every slot running `want` with its code bound */
+static unsigned unsettled_slot(const uint8_t *want) /* the first slot not running `want` with its code bound, 16 none */
 {
-    if (!dl_publication_idle()) return 0;
     for (unsigned i = 0; i < 16u; ++i)
-        if (LIVE_SET[i] != want[i] || (want[i] < MODWERK_FX_IDS && !dl_catalog[want[i]].resident && !dl_bound(core_of_slot(i), want[i]))) return 0;
-    return 1;
+        if (LIVE_SET[i] != want[i] || (want[i] < MODWERK_FX_IDS && !dl_catalog[want[i]].resident && !dl_bound(core_of_slot(i), want[i]))) return i;
+    return 16u;
+}
+static int settled(const uint8_t *want) { return dl_publication_idle() && unsettled_slot(want) > 15u; } /* the manager idle too */
+/* A set that never settles (a tester's unit, 25 October 2026: a batch waited with 5 of 7 placed until the site gave up
+ * after three minutes, twice in one boot). The manager never asks again for an automatic set it refused (finding 70),
+ * so it is nudged once; still unsettled after about four seconds, the test fails with `why`, names the first slot's
+ * effect and puts the tracks back. */
+static void waiting(volatile struct selftest *t, const uint8_t *want, uint32_t why)
+{
+    if (st_ticks == 120u) nudge = 1;
+    if (st_ticks <= 240u) return;
+    unsigned i = unsettled_slot(want);
+    if (i < 16u) blame(want[i], 0);
+    t->failed |= why, t->phase = SELFTEST_RESTORE, st_ticks = 0;
 }
 /* Settled, judged at least seven ticks after the change, once the manager has taken it: a set that only takes code
  * off looks settled before the manager has seen it, and its next step would then meet the old code still loaded. */
@@ -1052,6 +1188,9 @@ int modwerk_selftest_start(void)
         }
     t->modules = modwerk_runtime_active(), t->dsp = st_queued, t->intact = modwerk_runtime_intact(), t->total = st_queued + 2u;
     if (t->intact != t->modules) t->failed |= SELFTEST_BROKEN, blame(MODWERK_FX_IDS, modwerk_runtime_broken());
+    /* A stall earlier this boot shut the loader off: no module's DSP code loads until a restart, so nothing here can
+     * pass (a release image passed with it so on the owner's MKII, 24 October 2026). */
+    if (!dl_residency_enabled) t->failed |= SELFTEST_STOPPED;
     for (unsigned i = 0; i < 16u; ++i) st_live[i] = st_base[i] = st_want[i] = LIVE_SET[i];
     for (unsigned tr = 0; tr < 8u; ++tr) for (unsigned b = 0; b < 72u; ++b) st_lanes[tr][b] = LANE(tr)[b];
     st_counted = counted(), st_ticks = st_step = st_back = 0, st_played = 0;
@@ -1135,7 +1274,7 @@ static void together(volatile struct selftest *t)
         return;
     }
     if (st_step == HOLD) { /* until both cores' meters have a fresh window with everything bound */
-        if (st_reads == ~0u) { if (settled(st_want)) st_reads = modwerk_status_reads, st_ticks = 0; return; }
+        if (st_reads == ~0u) { if (settled(st_want)) st_reads = modwerk_status_reads, st_ticks = 0; else waiting(t, st_want, SELFTEST_REFUSED); return; }
         if (st_ticks > 6u && modwerk_status[4] > t->peak[0]) t->peak[0] = modwerk_status[4];
         if (st_ticks > 6u && modwerk_status[2] > t->peak[1]) t->peak[1] = modwerk_status[2];
         if (modwerk_status[0] > t->cpu) t->cpu = modwerk_status[0];
@@ -1189,7 +1328,7 @@ static void together(volatile struct selftest *t)
     if (st_queued) { /* the modules off first, then an emptied core's effects back: their code arrives once the modules' left */
         if (!st_back) set_live(st_base), st_back = 1, st_ticks = 0;
         if (st_back == 1u) { if (!taken(st_base) && st_ticks <= 300u) return; set_live(st_live), st_back = 2, st_ticks = 0; }
-        if (!taken(st_live)) return;
+        if (!taken(st_live)) { waiting(t, st_live, SELFTEST_NOT_BACK); return; }
         for (unsigned i = 0; i < 16u; ++i) st_base[i] = st_want[i] = st_live[i];
         for (unsigned i = 0; i < 8u; ++i) t->track[i] = 0;
         st_used = st_try = st_batch = st_back = 0, st_step = PLACE;
@@ -1203,7 +1342,7 @@ static void selftest_tick(void)
     if (t->state != SELFTEST_RUNNING) return;
     ++st_ticks;
     if (t->phase == SELFTEST_CONFIGURATION) { /* PLAY, and the checks once it plays */
-        if (!st_step) { press(0x28u), st_played = 1, st_step = 1, st_ticks = 0; return; }
+        if (!st_step) { if (press(0x28u)) st_played = 1, st_step = 1, st_ticks = 0; return; }
         if (PLAYING && st_ticks > 6u) { started(t); return; }
         if (st_ticks > 120u) t->failed |= SELFTEST_ABORTED, t->phase = SELFTEST_RESTORE, st_ticks = 0; /* it would not play */
         return;
@@ -1236,7 +1375,7 @@ static void selftest_tick(void)
     }
     set_live(st_live);
     if (!taken(st_live) && st_ticks <= 300u) return;
-    if (st_played && PLAYING) { if (st_step != 9) press(0x27u), st_step = 9, st_ticks = 0; if (st_ticks < 60u) return; }
+    if (st_played && PLAYING) { if (st_step != 9) { if (!press(0x27u)) return; st_step = 9, st_ticks = 0; } if (st_ticks < 60u) return; }
     finish();
 }
 #endif
@@ -1314,6 +1453,18 @@ static void compact_tick(void)
     if (modwerk_dsp_compact_step)
         modwerk_dsp_compact_counts = holes() ? 0xffffffffu : *(volatile uint32_t *)0xfc07c00cu - compact_at, modwerk_dsp_compact_step = 0;
 }
+/* manager.c's last way to place a pick that fits a core packed but not beside its live code (build_core.py
+ * TRANSITION_EDITS, beta finding 35): pack now, the request waiting. 0 when packing cannot run (the self-test, a
+ * host session) or no core has a hole; the wait ends after five seconds whatever the moves have done. */
+static uint32_t pack_at;
+int modwerk_dsp_pack(void)
+{
+    if (modwerk_selftest.state == SELFTEST_RUNNING || modwerk_upload_busy() || !holes()) return 0;
+    (void)modwerk_dsp_compact(); /* already packing: the request waits for that one */
+    pack_at = modwerk_runtime_ticks;
+    return 1;
+}
+int modwerk_dsp_packing(void) { return modwerk_dsp_compact_step && modwerk_runtime_ticks - pack_at < 300u; }
 #endif
 /* The compaction planner (dsp.c's move_one; host-tested by test_dsp.c): k placed blocks sorted by address (where each
  * starts, its words, its alignment, 0 as 1) in an arena of cap words. A copy needs one free run as big as its block,
@@ -1400,6 +1551,9 @@ void modwerk_dsp_tick(void)
         ((void (*)(const char *, unsigned))0x4005a2b8u)(text, 0xa0);
         modwerk_dsp_missing = modwerk_dsp_missing + 1;
     }
+#ifdef MODWERK_DEV
+    remote_tick();
+#endif
     if (nudge) { nudge = 0; dl_residency_nudge(); }
     if (picks_in == picks_out) return;
     uint32_t p = picks[picks_out % 4u];
@@ -1463,3 +1617,6 @@ unsigned modwerk_dsp_report(uint32_t *out)
  * the slot dry until then. Port publication.c with the Part routes. */
 void dl_publication_finish(void) {}
 void dl_publication_tick(void) {}
+/* status.c's NO ROOM box: whether the effect reads a Y buffer at all. One that reads none was refused for another
+ * slot's buffer, since every pick plans all sixteen (owner's MKII, 12 November 2026). */
+unsigned modwerk_dsp_reads_buffer(unsigned id) { return id < MODWERK_FX_IDS ? dl_catalog[id].buffer : 0u; }

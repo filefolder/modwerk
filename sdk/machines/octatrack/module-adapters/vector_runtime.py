@@ -4,7 +4,7 @@ from dataclasses import replace
 import hashlib
 from pathlib import Path
 
-CONTROL_SHA256 = 'c4f829e437ffbde1275c00827031b694a86011013d37269077e4696818323471'
+CONTROL_SHA256 = '4ea4778c545453ce37b2a106438b7a24460705295bef8ff7f9ab500787068bc0'
 ARITHMETIC = (
     ('\tsub.l #staging-268525901,%a1', '\tadd.l #268525901,%a1\n\tsub.l #staging,%a1'),
     ('\tlea saved-1187503478,%a1', '\tlea saved,%a1\n\tsub.l #1187503478,%a1'),
@@ -13,7 +13,8 @@ ARITHMETIC = (
 
 
 def source_variant(original):
-    """Keep self-references inside the package; address arithmetic does not alter CCR."""
+    """Keep self-references inside the package; address arithmetic does not alter CCR. Since VECTOR 0.2.6 the card
+    source asks SRC SETUP's page on VECTOR's own row itself (st_setup_page has no row-5 test), so the base's row works."""
     if hashlib.sha256(original.encode()).hexdigest() != CONTROL_SHA256:
         raise ValueError('Reviewed VECTOR runtime source changed.')
     for before, after in ARITHMETIC:

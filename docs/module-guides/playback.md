@@ -2,7 +2,7 @@
 
 Read [the module guides index](README.md) first. Anything that follows tempo also follows [sequencing.md](sequencing.md).
 
-**Applies to** modules with manifest `category: playback`: behaviour of sample playback that uses no effect slot. [Repitch](../../sdk/octabam/modules/repitch/README.md) follows project tempo by changing playback speed. [Preview Vol](../../sdk/octabam/modules/previewvol/README.md) previews samples at the default AMP volume.
+**Applies to** modules with manifest `category: playback`: behaviour of sample playback that uses no effect slot. [Repitch](../../sdk/octatrack/modules/repitch/README.md) follows project tempo by changing playback speed. [Preview Vol](../../sdk/octatrack/modules/previewvol/README.md) previews samples at the default AMP volume.
 
 ## Behave like the instrument
 
@@ -19,12 +19,14 @@ Read [the module guides index](README.md) first. Anything that follows tempo als
 
 - [ ] `sdk/catalog.json` entry, thumbnail, `resources.impact`, README sections, tutorial and screenshots; the screenshots show the SRC SETUP or attribute page where the option is chosen.
 - [ ] `compatibility.location` is `Flex / Static` (or what is true) and `limitations` lists what you did not measure.
-- [ ] `npm run module:verify -- <id> --os <your 1.40C>` and `npm run module:doctor -- <id>` are green.
+- [ ] `npm run module:doctor -- <id>` is green.
 
 ## Test
 
 `verify_repitch.py` is the pattern: hooks on the stock and the built image, the panel (`verify_repitch_ui.py`), and playback with a generated loop that must follow a live tempo change. Say which parts you ran.
 
+Test with a sample of an odd length and with start and end points away from its ends. A round length can put every point on a whole multiple of a block or DMA boundary, where rounding and alignment bugs never show.
+
 ## Digitakt and Digitone
 
-Playback behaviour sits in the core's render events (`ev_render_in`, `ev_render_out`). No playback-specific contract is documented for these machines yet. Read the [Digitakt guide](../../sdk/machines/digitakt/README.md), take what you need from the core's events, and record what you observed in TESTING.md.
+Playback behaviour sits in the core's render hooks (`ev_render_in`, `ev_render_out`). No playback-specific contract is documented for these machines yet. Read the [Digitakt guide](../../sdk/machines/digitakt/README.md), take what you need from the core's hooks, and record what you observed in TESTING.md.

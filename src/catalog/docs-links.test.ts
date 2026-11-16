@@ -66,9 +66,15 @@ describe('the guides agents read', () => {
   })
 
   it('names only npm scripts that exist', () => {
-    for (const file of files) {
+    // docs/VERIFICATION.md is frozen history (25 October 2026): it names the commands of its day, some since retired.
+    for (const file of files.filter(file => file !== 'docs/VERIFICATION.md')) {
       for (const [, name] of read(file).matchAll(/npm run (?:--silent )?([a-z][a-z0-9:-]*)/g)) expect(scripts.has(name), file + ' names npm run ' + name).toBe(true)
     }
+  })
+
+  it('lists every document in docs/ in its index', () => {
+    const index = read('docs/README.md')
+    for (const name of readdirSync(resolve(root, 'docs')).filter(name => /\.md$/i.test(name) && name !== 'README.md')) expect(index, 'docs/README.md lists ' + name).toContain('](' + name + ')')
   })
 
   it('keeps the owner flow out of the contributor context and reachable from it', () => {

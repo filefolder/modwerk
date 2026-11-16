@@ -32,6 +32,10 @@ until those results and owner review are recorded.
 Use Node 24, the reviewed GNU `m68k-elf` toolchain, a clean Elekloader checkout
 at `vendor/elekloader/kit/kit.json`'s commit (`npm run upstream:tools` keeps one
 in `~/.cache/modwerk-upstream/elekloader`) and your original OT OS 1.40C.
+The checkout runs with Modwerk's own firmware codec: a script puts it on `sys.path` only through
+`firmware_codec.use_elekloader()` ([`sdk/firmware_codec`](../../../firmware_codec/__init__.py)), which serves the
+section format, the `.syx` transport and the ColdFire decoder in place of the checkout's `codec/` and `isa/`
+(`sdk/tests/test_firmware_codec.py` checks every script).
 Both output directories below must be new and outside every Git checkout:
 
 ```sh
@@ -65,12 +69,32 @@ compile (`dev.c`) or a test there (`test_recipe.py`). `octatrack-base-sources.js
 (`octatrack-base.test.ts`, no firmware) fails when one changed or a file joined those folders. Rebuild and
 commit it with the beta base's options (the committed base is the beta base). `--beta` names every one of them
 (`BETA` in `scripts/octatrack-base.mjs`: USB MIDI, the twenty-channel USB Audio default and its variants, site
-events, table owners, the resident engines on demand, the controllers, module sets and cached module code), and
+hooks, table owners, the resident engines on demand, the controllers, module sets and cached module code), and
 `--write` takes no other:
 
 ```sh
 npm run octatrack:base -- --stock /private/OCTATRACK_OS1.40C.bin --beta --write
 ```
+
+Without the reviewed GCC on the host (Linux, 24 October 2026), build the toolchain image once with
+`docker build -f sdk/build/Dockerfile -t modwerk-toolchain:local .` (it compiles binutils and GCC, about half an
+hour) and run the same script in it. The image has `node` but no `npm`, and its home is not yours, so call the
+scripts directly and name the upstream checkout:
+
+```sh
+C=~/.cache/modwerk-upstream
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:$PWD" -v "$C:$C:ro" -w "$PWD" \
+  -e ELEKLOADER_DSP_ASM=/opt/toolchain/vendor/dsp56300/build/source/dsp_host/dsp_asm modwerk-toolchain:local \
+  node scripts/octatrack-base.mjs --stock /private/OCTATRACK_OS1.40C.bin --upstream "$C/elekloader" --beta --write
+```
+
+Mount the stock file's folder and any `--out` folder too. The base-bound relink runs the same way
+(`python3 -B scripts/octatrack-module-packages.py --base-only --upstream "$C/elekloader"`). Run the command without
+`--write` on a clean `main` first: it passes only when this toolchain reproduces the committed base. A fresh worktree
+needs `npm ci`'s generated files first (`npm run prepare`). To boot a built base in the emulator, use the adapted
+`ot_emu` from [scripts/octatrack-emulator](../../../../scripts/octatrack-emulator/README.md) with the `--out` folder's
+`MAIN.raw`: the plain octabam `ot_emu` boots it but never creates the base's status task, so the sequencer sends no
+MIDI. On Linux use `flock` where that README says `lockf -k`.
 
 Analog BD's trust row hashes its reviewed inputs, `machine-ports.json` among them, so an edit there (any machine's
 entry) also needs this regeneration.
@@ -78,7 +102,9 @@ entry) also needs this regeneration.
 USB Audio is part of the base: its output layout sets the USB descriptors, so each layout is its own base, sent over
 USB like any base update when a module set asks for another layout (`src/engine/elekloader/base-variants.ts`). The
 command above builds the twenty-channel default and, with `--usb-audio-variants`, the five other layouts and USB MIDI
-alone (`off`). `build_core.py` links the USB sources last and pads them to a fixed reserve (`USB_RESERVE`: 8 KiB of
+alone (`off`). The committed package stays the twenty-channel layout, which every other layout is a patch against, but the
+site installs `off` when no module set asks for a layout (`MEMBER_LAYOUT`, owner, 11 November 2026): `off` patches four
+stock audio sites fewer, so as the package it would fail the rule below. `build_core.py` links the USB sources last and pads them to a fixed reserve (`USB_RESERVE`: 8 KiB of
 code, 2.5 KiB of data, 96 KiB of bss), so every layout links everything else at the same addresses and one set of
 base-bound packages fits each. For every variant the script proves it: the controller packages encode byte for byte
 as on the default, `base_bound.py bind` gives the same binding but for the identity, the variant patches no stock site
@@ -102,7 +128,8 @@ checks the remaining published files against their manifest hashes without
 rebuilding or deleting them. Use the full generator for a separately qualified
 module update; existing standalone recipes may name earlier source/tool inputs.
 The cave/table declarations also pin the generator source, and they and the standalone recipes pin the Elekloader
-checkout's files, so a kit update (`vendor/elekloader/kit/kit.json`) needs the same refresh in its own pull request:
+checkout's files the build runs and Modwerk's codec in place of its `codec/` and `isa/` (`firmware_codec.inputs()`),
+so a kit update or a codec edit (`vendor/elekloader/kit/kit.json`) needs the same refresh in its own pull request:
 CI has no firmware and cannot see it, and until then the builds refuse with "does not name the exact source inputs"
 (kit 0.7.0, 22 October 2026). Refresh a generator-only pin only after rebuilding
 the affected packages and proving every published byte unchanged; never replace a pin merely to make a check pass.
@@ -122,6 +149,14 @@ stock-free, that the browser's path builds a `.bin` identical to `build_core.py`
 and `check_flash_safety.py`; `--out NEW-DIR` (outside Git) saves that `.bin` and its `MAIN.raw` for a RAM
 boot. It uses `~/.cache/modwerk-upstream` (`--upstream`, `ELEKLOADER_DSP_ASM`) as the build above does.
 
+### Take hooks
+
+A take hook in `../events.json` has no C prototype: beside its `events` entry it needs a `sites` entry with the
+site's guard and the tail that replays stock when nobody takes the call. `{"stock": n}` copies the site's bytes as
+they are, so a site holding a PC-relative branch needs its tail written as instructions with the branch made absolute
+(`ev_midi_note_key`'s `ble`). `ev_midi_note_key` runs where each sequencer, chord and arp note of a MIDI track is
+about to be corrected to KEY and sent; a taker rewrites or drops the note, and stock keeps every note-off.
+
 ### DSP effects on demand
 
 `--dsp-loader` loads every DSP effect on demand, stock and module alike.
@@ -131,8 +166,12 @@ it, admitted against each core's arena and cycle allowance first
 ([design and evidence](../../../../docs/OCTATRACK_ELEKLOADER_MIGRATION.md#milestone-2-dsp-effects-on-demand-e-verb-as-the-pilot-10-october-2026)).
 The base takes each core's whole stock effect block
 ([`dsp_loader.py`](dsp_loader.py)): the three stock routines other effects
-call stay resident at its start, then the receiver, then about 5,200 words
-of arena. Each stock effect is a package recovered at build time from your
+call stay resident at its start, then the receiver's frame path, then about
+5,450 words of arena (4,741 / 4,867 on the beta base, whose engines' stubs
+sit above it). The receiver's packet operations run from the top 512 words
+of each core's FX2 block 3 in the shared window, copied there from the
+arena's top at the first frame ([record](../../../../docs/OCTATRACK_DSP_WINDOW.md)).
+Each stock effect is a package recovered at build time from your
 firmware with Modwerk's relocation recipes and checked against their
 hashes; Octabam's DSP DYNLOAD STOCK is the reference for the layout. It
 needs Octabam's patched `dsp_asm` (`ELEKLOADER_DSP_ASM`), with
@@ -239,20 +278,77 @@ wValue the page, 244 bytes) reads it; the site uploads it only with diagnostics 
 `freezetest:N` holds the UI tick N seconds (1-10) to try a freeze. Vendor request numbers 31-36 are taken (saved-set
 export 31-33, volatile journal 34-36, which refuses anything else there): pick a new one above 37 and check `ep0.c`.
 
+### Boot guard
+
+`modset.c` keeps a small record in battery RAM (0x100ffb00, after the stall record) from the power-on restore's first
+install until it has run ten seconds with frames moving and no crash or stall recorded. A crash (`crash.c` restarts at
+once) or a DSP stall in that time leaves the record armed, and the next start leaves out the package it was installing,
+at every start until the card's set changes (result 10 in the self-test record's `saved`, popup `<NAME> LEFT OUT`,
+refusal 0x100 in the log's set record). With no package to blame, or on the second start in a row that never settled
+with nothing recorded, that start installs nothing (result 11, MODULES HELD, 0x101) and the next tries the whole set.
+Another base ignores the record. On development bases `npm run device -- guardtest` (or `guardtest:0`) arms it as a
+crash in the restore would, blaming the set's first module (or none), so a RAM boot shows what a tester's next start would.
+
+### The base's version
+
+A base has a version for people, `major.minor` or `major.minor.patch`, in [`base-version.json`](base-version.json)
+(owner, 16 November 2026; 0.7 is the first). A patch of 0 is left out, so 0.7 is not 0.7.0. `build_core.py` builds it into the base, whose status page says it in its title (`MODWERK BASE 0.7`).
+`npm run octatrack:base -- --write` records the version's identities, one per USB Audio layout, in
+[`base-versions.json`](../base-versions.json), from which the site names the base a unit reports; a base from before
+versions, or a development build, keeps the start of its identity. Raise the number for every base that is published:
+the patch one for an update (0.7 to 0.7.1, owner, 16 November 2026), the minor or major one only when the owner says so. The build refuses a
+version that `origin/main` already has with other contents. The identity stays what packages, saved sets and USB check.
+
+### Modules on and off
+
+PROJ > MODWERK > MODULES (`status.c`) lists every installed module by name with ON or OFF, and YES switches the one
+under the cursor at once. The page only asks; the engine task switches at its next service (`modset.c`), with the unit
+stopped and no host session open:
+
+- **Off** unloads the module through the loader with the same empty package a host's removal sends, so a module a track
+  runs is refused (`IN USE ON A TRACK`) and nothing changes. Its package moves from the set to the shelf.
+- **On** installs the shelved package as the power-on restore installs one, and it joins the set again.
+
+The set therefore still names exactly what runs, and every identity a host checks (the live set's digest, a sync's
+baseline) holds without a rule for modules that are off. The shelf is saved in the same file, after the set's sectors:
+a set with a shelf is version 2 and is whole only with a whole shelf of its own generation behind it, so a write cut
+short falls back to the other file's older set and shelf (`sdk/tests/runtime_card_shelf.c` cuts the power before every
+sector). The shelf takes its room from the set's, and it goes with the set when another base starts (FOREIGN). A host
+that installs a module that is off switches it on; one that removes it takes it off the shelf. PROJ held at power-on
+skips the set and keeps the shelf. A start that did not load the card's whole set refuses a switch (saving its smaller
+set would lose the rest): `RESTART FIRST` after a skipped or held start, or one the boot guard left a module out of;
+`SYNC ON THE SITE FIRST` after another base's set, a damaged file or a module that failed to load. A module that is off
+is not missing: MISSING marks it (OFF) and YES switches every one on; it opens for one only after a project load, not
+right after the player switched it off, and its track says `<NAME> IS OFF`. Switching off a module another Part names
+says where (`USED IN C SAVED PART 2 T5`).
+
+A host reads the shelf with OFF (0xC1, bRequest 40, wValue the first entry, wLength 288): `MWO`, the entries in the
+reply, the count of all, then 56 bytes a module, an INVENTORY entry and its package's SHA-256, 5 a page. The site lists
+those modules as switched off. A sync leaves the ones its set has as they are and removes the others with the
+removal package any module gets (`sdk/tests/runtime_card_guard.c`: the loader takes one for a module that is not running).
+
 ### Status page
+
+`status.s` also gates stock's time-stretch helper task (`mw_ts_gate`): it skips a track whose TSTR is OFF, since only
+time-stretch reads its splice search and only BEAT reads its transient markers.
 
 `status.c` measures, all the time, the ColdFire's load (main's idle spin, timed on DTIM3, `status.s`), each
 DSP core's mean and peak load (core 0's own idle count, core 1's counted wait for core 0, `dsp_receiver.asm`),
 each core's code arena, the delay-buffer blocks and the module pool. CUE + PROJ shows it as a dialog (NO closes it),
-and so does PROJ > MODWERK > LOAD: MODWERK STATUS in two sections, WORKING NOW (CPU, then each DSP chip by its tracks,
-measured, with the recent peak; tracks 1-4 run on core 1, tracks 5-8 on core 0) and DSP SPACE USED (per chip, the fuller
-of what admission books and its code memory: what says DSP MEMORY FULL first); `npm run device -- stats` prints it from the loader report on development
+and so does PROJ > MODWERK > STATUS: MODWERK BASE and its version over five rows, each with its bar: CPU, DSP T1-4 and
+DSP T5-8 (each DSP chip's time by its tracks, measured, with the recent peak; tracks 1-4 run on core 1, tracks 5-8 on
+core 0), then MEM T1-4 and MEM T5-8 (DSP memory per chip, the fuller of what admission books and its code memory: what says
+DSP MEMORY FULL first); `npm run device -- stats` prints it from the loader report on development
 bases. PROJ > MODWERK is a fifth root category (Octabam's MAINMENU.md: the root window is five rows tall, stock fills
-four; `build_core.py` copies the four stock rows and appends it, with its icon and list): LOAD, MODULE LOAD (each
+four; `build_core.py` copies the four stock rows and appends it, with its icon and list): MODULES last ("Modules on
+and off" above), and before it STATUS, MODULE COST (each
 installed module's share of each core's frame from its own cycle figure, `~` when that is 7/4 of an emulator claim:
 the meters see only each core's sum), MISSING (each module a project names but no installed module serves, with where
 it is named first: the current bank, then the others, a working Part before a saved copy, `BANK A SAVED PART 2 T5`;
-its slots show NONE's page renamed MISSING, `MISS` in the footer) and SELF TEST. SYSTEM stays stock. A DSP core's load is its idle passes times their calibrated cycles (20.0 on core 0, 14.5 on core 1)
+its slots show NONE's page renamed MISSING, `MISS` in the footer; since 0.7.3 also each machine the project uses that
+no installed machine serves, from `machine_registry.c`'s machine map: a Part names a machine only by its signature, so
+the map keeps each one's module and name, in battery RAM at `0x100ffd40` and in project.work as `#MODWERK_MC=` lines
+beside the effects' `#MODWERK_FX=`; its track then says `MISSING POLY8` or `POLY8 IS OFF`) and SELF TEST. SYSTEM stays stock. A DSP core's load is its idle passes times their calibrated cycles (20.0 on core 0, 14.5 on core 1)
 of a 72,520-cycle frame; recalibrate with `build_core.py --dsp-burn 1000` (core 0) or `-1000` (core 1).
 
 
@@ -279,7 +375,12 @@ MIDI and USB Audio are base-owned features in the beta composite configuration
 shared MIDI receiver lives in [`usbmidi_rx.s`](usbmidi_rx.s), beside its upstream MIT licence.
 Both reset/session-end paths retire its old session before continuing to the
 audio/stock handler, and SET_CONFIGURATION flushes EP2 before rewriting its
-queue heads. The legacy card module retains its own earlier source until its
+queue heads. The file stays as imported: `receiver_source` in
+`base_usb_functions.py` adds, at two guarded seams, the one change the base
+makes to it: while DIN clock runs (the UART's last `0xF8` stamp is under the
+clock handler's 167 ms resync gap old), USB clock, transport and song position
+are dropped, so the two clocks never add up to double the tempo.
+The legacy card module retains its own earlier source until its
 separate, versioned update; a base fix does not update that card download.
 
 The private builder also accepts `--usb-audio 'USB AUDIO OUT TRACKS POST'`.
@@ -426,7 +527,7 @@ is recovered from the Startup Menu over DIN MIDI.
 1. Build with `build_core.py` (above) and install `NOT_FLASH_CANDIDATE.syx`
    or `.bin` the way you install any test OS.
 2. Leave USB disk mode, stop playback and recording, and connect USB.
-3. Run `npm run dev` and open `http://localhost:5173/dev/octatrack-usb.html`
+3. Run `npm run dev` and open `http://localhost:5173/src/dev/octatrack-usb.html`
    in Chrome. **Run lifecycle** claims only the vendor interface, loads a
    test module, replaces and rolls it back, removes it, and reads each
    effect back through the base's read-only DIAG request. The slot is empty
@@ -446,7 +547,8 @@ command waits until IDENTIFY reports that build's `configurationHash`. A
 power cycle boots the flashed base again. Stop playback and recording first;
 the restart is a reboot.
 
-The base accepts only an OS image (entry word, at most 1.25 MiB) carrying
+The base accepts only an OS image (entry word, at most 1.5 MiB; 1.25 MiB on
+bases before 13 November 2026, which a released base must still fit) carrying
 NOR's own bootstrap version, because an image with another version would
 reprogram the bootstrap at its entry. It stages the image in its own
 reserve, arms a one-shot mailbox, and half a second later quiesces as OS
@@ -478,21 +580,48 @@ NOR when a host asks, with stock's OS UPGRADE routines (the sector erase and
    Both are compared by SHA-256, never with the running RAM, which stock rewrites
    once started: the copy with stock 1.40C's digest, the stream with the digest
    `.boot` takes right after unpacking it (`modwerk_flash_snapshot`).
-   Then OS UPGRADE's quiesce, the sectors up to the container's end erased, the
-   pages programmed, NOR compared word by word (once more after a second write),
-   and the reply. A container NOR already holds writes nothing.
-3. Accept (or any rollback after the write) restarts the unit half a second on,
-   as a RAM boot does but with no mailbox, so the bootstrap unpacks NOR: the new
-   base. The host sees it come back and checks IDENTIFY.
+   Then the write, into one of **two slots** (below), and the reply. **At most
+   one restart per update:** this base writes itself while it runs on (no
+   quiesce: stock's routines mask only their command writes and the OS runs
+   from RAM), with its own screen on the unit (BASE UPDATE, a bar, the panel held
+   until it is saved: `status.c`'s transfer screens) and BASE SAVED after; the next start is from the new slot.
+3. On a unit already on two slots there is no trial: the running base takes the
+   new base's container for its spare slot (only the checks that keep the
+   bootloader safe: entry, bootstrap version, stock's bootloader copy), writes it
+   under OS UPGRADE's quiesce and stock's upgrade screen, and accept restarts the
+   unit half a second on, as a RAM boot does but with no mailbox: Elektron's
+   bootloader starts our boot stub, which starts the new slot. The host checks
+   IDENTIFY. A base never takes another base's container on a unit with one copy.
+
+**Two slots** ([docs/OCTATRACK_TWO_SLOT_BASE.md](../../../../docs/OCTATRACK_TWO_SLOT_BASE.md),
+`slots.h`): a boot stub at `0x4000` (`stub.s`, `stub.c`, built by `build_stub.py`
+into `stub_body.c`) starts the newest whole slot of A (`0x10000`) and B
+(`0x100000`), or the other one after an unconfirmed slot failed to start twice
+(UPDATE UNDONE on the unit; SLOTS, vendor request 39, tells the site). A base
+confirms its slot 15 s after starting from it (BASE UPDATED); a slot another base
+wrote also waits for a computer's USB contact. A write goes only into the slot
+the unit can lose, its record page last, so a power cut or USB dropout at any
+point leaves a base that starts. A unit with one copy (the card's install) is
+converted on its first update: its base copied to B and confirmed, the stub's
+sector, then the new base into A. That sector is the one moment, once per unit
+and under a second, when a cut still needs the startup menu. Flash with neither
+layout is refused (refusal 108).
 
 A verify that still fails after the second write answers `uncertain` and leaves
 the unit running from RAM for another try (the self-test record's `refusal`
-reads 100 + flash.h's reason); only a power-off then needs the Startup Menu.
-The write itself (some seconds) is the window a power cut can hit, as with
-the card. A base without the capability (feature bit 8 of CAPABILITIES) still
-needs the card once. Host check: `test_flash.c` (NOR modelled as clearing
-bits only, the kit's packer for the fixture); the stock routines, the quiesce
-and the restart are hardware-only.
+reads 100 + flash.h's reason). The site (`OctatrackLink.writeBase`) writes
+again after a failed verify or a lost reply, reopening the unit first so its
+connect rolls the lost session back, until the unit comes back on the new base
+from NOR: a repeat writes nothing when the slot the stub starts next already
+holds it. Two rules keep any update from bricking a unit: nothing writes below
+`0x4000`, where Elektron's bootloader and its FUNC startup menu (MIDI UPGRADE,
+the recovery) live, and once a write may have started, the site never shows an
+error that invites switching the unit off. A base without the capability
+(feature bit 8 of CAPABILITIES) still needs the card once. Host check:
+`test_flash.c` (NOR modelled as clearing bits only, a power cut after every
+operation); `check_stub.py` runs the stub with the bootloader's own code from
+your OS file in Unicorn. Stock's routines, its screen, the quiesce and the
+restart are hardware-only.
 
 `build_ports.py` prepares independent source ports with the same pinned SDK
 and its native source checker. It registers the internal USB MIDI dependency

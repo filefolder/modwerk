@@ -42,6 +42,8 @@ def load(path=REGISTRY):
     for f in reg['features']:
         if not f['cores'] or set(f['cores']) - {'A', 'B'} or any(i not in bits or i == f['bit'] for i in f['implies']) or \
                 ('executed' in f and not (isinstance(f['executed'], int) and 0 < f['executed'] < 65536)) or \
+                ('hardware' in f and not (isinstance(f['hardware'], int) and 0 < f['hardware'] < 65536 and
+                                          isinstance(f.get('evidence'), str))) or \
                 f.get('packaged', False) not in (True, False):
             raise ValueError('dsp-sites.json: feature ' + f['name'] + ' has bad cores or implies')
     for n, s in enumerate(reg['sites']):
@@ -97,6 +99,15 @@ def reset_words(reg):
     """({feature: words its reset writes on a core}, {feature: its first region's words if it has more than one, else
     0}), from its spans in order; the same on every core it runs on."""
     totals, firsts = {}, {}
+    for f, ends in reset_ends(reg).items():
+        totals[f], firsts[f] = ends[-1], ends[0] if len(ends) > 1 else 0
+    return totals, firsts
+
+
+def reset_ends(reg):
+    """{feature: the logical end of each of its regions on a core, in order}: a reset chunk never crosses one (one
+    owned range per chunk); the same on every core it runs on."""
+    out = {}
     for f in reg['features']:
         per = {}
         for feature, core, _, _, words in spans(reg):
@@ -104,9 +115,20 @@ def reset_words(reg):
                 per.setdefault(core, []).append(words)
         if len({tuple(v) for v in per.values()}) != 1:
             raise ValueError('dsp-sites.json: feature %s owns different regions on its cores' % f['name'])
-        runs = next(iter(per.values()))
-        totals[f['bit']], firsts[f['bit']] = sum(runs), runs[0] if len(runs) > 1 else 0
-    return totals, firsts
+        runs, end, out[f['bit']] = next(iter(per.values())), 0, []
+        for words in runs:
+            end += words
+            out[f['bit']].append(end)
+    return out
+
+
+def reset_end_expression(reg, feature, offset):
+    """C: the logical end of the region `offset` falls in, for `feature` (0 for a feature the ledger does not know)."""
+    rows = []
+    for bit, ends in reset_ends(reg).items():
+        inner = ' : '.join('%s < %uu ? %uu' % (offset, e, e) for e in ends[:-1])
+        rows.append('%s == %uu ? %s' % (feature, bit, '(%s : %uu)' % (inner, ends[-1]) if inner else '%uu' % ends[-1]))
+    return '(%s : 0u)' % ' : '.join(rows)
 
 
 def header(reg):
@@ -123,7 +145,11 @@ def header(reg):
     for f in reg['features']:
         if 'executed' in f:
             lines.append('#define MW_DSP_%s_EXECUTED %uu  /* its tap: executed instructions a sample for a core\'s four tracks, '
-                         'counted statically; charged at 7/4 until timed on a unit */' % (names[f['bit']], f['executed']))
+                         'counted statically%s */' % (names[f['bit']], f['executed'],
+                                                     '' if 'hardware' in f else '; charged at 7/4 until timed on a unit'))
+        if 'hardware' in f:
+            lines.append('#define MW_DSP_%s_HARDWARE %uu  /* its tap: chip cycles a sample for a core\'s four tracks, timed on '
+                         'a unit (%s); its charge */' % (names[f['bit']], f['hardware'], f['evidence']))
     implies = ' | '.join('((f) & %uu ? %uu : 0u)' % (f['bit'], sum(f['implies'])) for f in reg['features'] if f['implies'])
     lines.append('/* What a held feature holds too. */')
     lines.append('#define MW_DSP_IMPLIED(f) ((f) | %s)' % (implies or '0u'))
@@ -138,6 +164,8 @@ def header(reg):
     lines.append(' * when it has more than one: a reset chunk never crosses it (one owned range per chunk). */')
     lines.append('#define MW_DSP_RESET_WORDS(f) (%s : 0u)' % ' : '.join('(f) == %uu ? %uu' % (bit, totals[bit]) for bit in names))
     lines.append('#define MW_DSP_RESET_SPLIT(f) (%s : 0u)' % (' : '.join('(f) == %uu ? %uu' % (bit, firsts[bit]) for bit in names if firsts[bit]) or '0u ? 0u'))
+    lines.append('/* The logical end of the region a reset offset falls in: a chunk from o is at most MW_DSP_RESET_END(f, o) - o. */')
+    lines.append('#define MW_DSP_RESET_END(f, o) %s' % reset_end_expression(reg, '(f)', '(o)'))
     lines += ['', 'struct mw_dsp_region { uint8_t feature, core, space; /* space: 1 x, 2 y */ uint8_t pad; uint32_t address, words; };',
               'static const struct mw_dsp_region mw_dsp_regions[] = {']
     for feature, core, space, address, words in spans(reg):
@@ -212,11 +240,16 @@ def check(reg):
                 problems.append('payload %s: feature %d\'s regions are not in resident_dsp.resource_ranges\'s order' % (tag, f))
     for f in reg['features']:
         if f['name'] == 'keybus':
-            text = (SDK / 'modules/sidechain-compressor/upstream/tools/patch_sc_dsp3.asm').read_text()
+            text = (SDK / 'modules/sidechain-compressor/patch_sc_dsp3.asm').read_text()
             for old, new in resident_dsp.REVIEWED['sidechain-compressor'][1]:
                 text = text.replace(old, new)
             if f.get('executed') != resident_dsp.keybus_executed(resident_dsp.split_sidechain(text)[1]):
                 problems.append('keybus: its executed figure differs from its tap\'s static count (resident_dsp.keybus_executed)')
+        if 'hardware' in f:
+            # The charge is a timing on a unit: its record must exist and give the same figure.
+            record = HERE / f['evidence']
+            if not record.is_file() or json.loads(record.read_text()).get('cyclesPerSample') != f['hardware']:
+                problems.append('%s: its hardware figure differs from %s\'s cyclesPerSample' % (f['name'], f['evidence']))
     if not HEADER.is_file() or HEADER.read_text() != header(reg):
         problems.append('resident-runtime/dsp_ledger.h is stale: run dsp_sites.py --write')
     return problems

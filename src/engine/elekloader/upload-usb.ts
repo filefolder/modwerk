@@ -32,6 +32,28 @@ export function parseRuntimeCapabilities(view: DataView): RuntimeCapabilities {
     throw new VendorTransportError('The Octatrack’s loader capabilities could not be read.')
   return { abi: view.getUint8(5), features: view.getUint16(6), maxSites: view.getUint16(8), maxCopies: view.getUint16(10) }
 }
+export const VENDOR_SLOTS = 39 // the base's two-slot layout (sdk/machines/octatrack/elekloader/flash.h); older bases stall it
+export const VENDOR_OFF = 40 // the modules switched off on the unit (elekloader/modset.c's shelf); older bases stall it
+export const OFF_PAGE = 5 // entries an OFF reply holds; wValue is the first (elekloader/status.h)
+export const OFF_BYTES = 8 + 56 * OFF_PAGE
+export const SLOTS_BYTES = 24
+/** Where the base lives in the unit's flash (docs/OCTATRACK_TWO_SLOT_BASE.md). `fellBack`: the newest slot's base did
+ * not start three times, so the boot stub started the previous one. Null before the base's first look after a start. */
+export interface BaseSlots {
+  layout: 'one' | 'two' | 'other'
+  running: 0 | 1 | null
+  fellBack: boolean
+  confirmed: boolean
+  slots: { generation: number; whole: boolean; confirmed: boolean; tries: number }[]
+}
+export function parseBaseSlots(view: DataView): BaseSlots | null {
+  if (view.byteLength !== SLOTS_BYTES) throw new VendorTransportError('The Octatrack’s base slots could not be read.')
+  if (view.getUint32(0) !== 0x4d575353) return null // "MWSS": zeros until the base has looked
+  const flags = view.getUint8(6), running = view.getUint8(5)
+  return { layout: (['one', 'two'] as const)[view.getUint8(4)] ?? 'other', running: running === 0 || running === 1 ? running : null,
+    fellBack: !!(flags & 1), confirmed: !!(flags & 2),
+    slots: [8, 16].map(at => ({ generation: view.getUint32(at), whole: !!(view.getUint8(at + 4) & 1), confirmed: !!(view.getUint8(at + 4) & 2), tries: view.getUint8(at + 5) })) }
+}
 /** The device can receive SUBMIT data stages; without it only IDENTIFY answers. */
 export const VENDOR_CAN_SUBMIT = 1
 export const VENDOR_VERSION = 1
@@ -104,6 +126,19 @@ function parseModules(view: DataView, magic: number): MissingModule[] {
     module: view.getUint32(8 + 24 * i).toString(16).padStart(8, '0'),
     name: String.fromCharCode(...new Uint8Array(view.buffer, view.byteOffset + 12 + 24 * i, 16)).replace(/\0.*$/s, '').trim() }))
 }
+/** A module switched off on the unit (PROJ > MODWERK > MODULES): installed, saved, not running. */
+export interface OffModule extends MissingModule { sha256: string }
+/** OFF ("MWO"): the entries in this reply, the count of all (u16), two zero bytes, then 56 bytes a module: an INVENTORY
+ * entry (handle 0xff, -, layout u16, module id u32, name 16) and its package's SHA-256. */
+export function parseOff(view: DataView): { modules: OffModule[]; count: number } {
+  const n = view.byteLength >= 8 ? view.getUint8(3) : -1
+  if (n < 0 || view.getUint32(0) >>> 8 !== 0x4d574f || view.byteLength !== 8 + 56 * n || view.getUint16(6)) throw new VendorTransportError('Not a list of switched-off modules.')
+  const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+  return { count: view.getUint16(4), modules: Array.from({ length: n }, (_, i) => { const at = 8 + 56 * i; return { handle: bytes[at], layout: view.getUint16(at + 2),
+    module: view.getUint32(at + 4).toString(16).padStart(8, '0'),
+    name: String.fromCharCode(...bytes.subarray(at + 8, at + 24)).replace(/\0.*$/s, '').trim(),
+    sha256: [...bytes.subarray(at + 24, at + 56)].map(byte => byte.toString(16).padStart(2, '0')).join('') } }) }
+}
 export function parseVendorIdentity(bytes: Uint8Array): VendorIdentity {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const fail = (why: string): never => { throw new VendorTransportError('Unsupported vendor identity: ' + why + '.') }
@@ -174,6 +209,15 @@ export class UsbVendorTransport implements UploadTransport {
     if (reply.status === 'stall') return undefined
     if (reply.status !== 'ok' || !reply.data) throw new VendorTransportError('The Octatrack did not answer the loader capabilities request.')
     return parseRuntimeCapabilities(reply.data)
+  }
+  /** Read-only, from the interrupt: undefined from a base before the two slots (it stalls), null before its first look. */
+  async slots(signal?: AbortSignal): Promise<BaseSlots | null | undefined> {
+    signal?.throwIfAborted()
+    const reply = await this.device.controlTransferIn(this.setup(VENDOR_SLOTS, 0), SLOTS_BYTES)
+    signal?.throwIfAborted()
+    if (reply.status === 'stall') return undefined
+    if (reply.status !== 'ok' || !reply.data) throw new VendorTransportError('The Octatrack did not answer the base slots request.')
+    return parseBaseSlots(reply.data)
   }
   /** Cached, read-only live meters. Older bases explicitly stall this request. */
   async load(signal?: AbortSignal): Promise<LoadReading | undefined> {
@@ -319,6 +363,24 @@ export class UsbVendorTransport implements UploadTransport {
   missing(signal?: AbortSignal) { return this.modules(VENDOR_MISSING, parseMissing, signal) }
   /** The modules installed on the unit, the same way; undefined from a base built before INVENTORY. */
   inventory(signal?: AbortSignal) { return this.modules(VENDOR_INVENTORY, parseInventory, signal) }
+  /** The modules switched off on the unit, a page of 5 at a time; undefined from a base built before the MODULES page.
+   * The base also stalls the request for the moment its list moves (a switch being made), so the first page is asked
+   * a few times before a stall means an older base. */
+  async off(signal?: AbortSignal): Promise<OffModule[] | undefined> {
+    const all: OffModule[] = []
+    for (let first = 0, stalls = 0; ; ) {
+      signal?.throwIfAborted()
+      const reply = await this.device.controlTransferIn(this.setup(VENDOR_OFF, first), OFF_BYTES)
+      if (reply.status === 'stall') {
+        if (++stalls > 3) { if (!first) return undefined; throw new VendorTransportError('The device did not finish its list of switched-off modules.') }
+        await wait(50, signal ?? AbortSignal.timeout(2000)); continue
+      }
+      if (reply.status !== 'ok' || !reply.data) throw new VendorTransportError('The device did not answer the switched-off modules request.')
+      const page = parseOff(reply.data)
+      all.push(...page.modules); first += page.modules.length; stalls = 0
+      if (page.modules.length < OFF_PAGE) return all
+    }
+  }
   /** Request 38 is a cached, read-only whole-set digest. A stale cache wakes
    * its engine owner; no scan or hash runs in the USB interrupt. */
   async setIdentity(signal?: AbortSignal): Promise<string> {

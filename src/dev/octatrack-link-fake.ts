@@ -4,8 +4,9 @@
 // real bytes, and runs the upload session's phases with no device behind them.
 import type { Inventory, InventoryTarget } from '../config/inventory.ts'
 import { sha } from '../../vendor/elekloader/kit/src/bytes.ts'
-import { OctatrackLink, type LinkDevice, type LinkSession, type LinkUsb } from '../engine/elekloader/octatrack-link.ts'
-import { UPLOAD_TIMEOUT_MAX_MS, UploadDeviceError } from '../engine/elekloader/upload-session.ts'
+import { depackSection } from '../engine/elektron/codec/depack.ts'
+import { ELEKTRON_VENDOR_ID, OCTATRACK_PRODUCT_ID, OctatrackLink, type LinkDevice, type LinkSession, type LinkUsb } from '../engine/elekloader/octatrack-link.ts'
+import { UPLOAD_TIMEOUT_MAX_MS, UploadDeviceError, UploadUnconfirmedError } from '../engine/elekloader/upload-session.ts'
 import { SELFTEST_BYTES, VENDOR_CLASS, VENDOR_PROTOCOL, VENDOR_SUBCLASS } from '../engine/elekloader/upload-usb.ts'
 import type { UploadPhaseName, UploadResultName, UploadStatus } from '../engine/elekloader/upload-wire.ts'
 import baseBinding from '../../sdk/machines/octatrack/base-binding.json' with { type: 'json' }
@@ -32,6 +33,11 @@ export interface FakeUnit {
   /** The base the unit runs (IDENTIFY), and the one in its NOR: a RAM boot changes the first, a USB base update both. */
   base: string
   flashed: string
+  /** The base runs out of RAM although NOR holds the same one (just after it saved itself on two slots): its gate
+   * does not read the mailbox either, so an armed trial restarts it from NOR first. */
+  fromRam?: boolean
+  /** What the base stages (HELLO's capacity); 262144 when unset. */
+  capacity?: number
   /** The base writes its own container to NOR over USB (capability feature bit 8, flash.c). */
   updatesBase: boolean
   /** Whole-set transaction capability (512), opt in in lifecycle tests. */
@@ -55,6 +61,24 @@ export interface FakeUnit {
   /** The running base refuses to write its own container with this reason (flash.h flash_refusal); its record reports
    * 100 + it, as dsp.c does. */
   writeRefusal?: number
+  /** Writes of its own container that fail their verify (flash.h FLASH_WRITE, record 107): NOR is left without a
+   * base ('') and the unit stays up from RAM for another try. */
+  writeFails?: number
+  /** Writes during which USB drops: the write finishes on the unit, the reply is lost, and the replugged unit's
+   * reset rolls the lost session back, which restarts it on NOR (flash.c f_restore). */
+  writeDropouts?: number
+  /** Stagings of its own container whose reply is lost before the write: nothing is written, the unit runs on. */
+  stageLosses?: number
+  /** The restart after a saved write hangs at the logo (a DSP stalled while the base was sent does not park): the unit
+   * goes away and comes back only when plugged again, as after a power cycle. */
+  restartHangs?: boolean
+  /** RAM boots whose restart loses USB: the unit runs the new base but stays away until plugged again, as only a power
+   * cycle (which starts the flashed base) brings it back. */
+  bootHangs?: number
+  /** SLOTS (request 39, flash.h): the base's two-slot record; absent, the base stalls it as one before the two slots.
+   * A base that answers it writes another base's container into its spare slot and restarts once onto it, and its own
+   * (after the trial) while it runs on, without a restart (flash.c); one that does not restarts after writing itself. */
+  slots?: Uint8Array
   /** Rollbacks the loader cannot switch yet (an effect's code still being published): the controller stays in recovery. */
   stuck?: number
   /** The runtime ids (hex) of the modules the kept runtime packages installed, as INVENTORY lists them, and each kept
@@ -71,7 +95,7 @@ export function fakeUnit(kind: 'base' | 'stock' | 'none' = 'base'): FakeUnit {
     const interfaces = [{ interfaceNumber: 0, alternates: alternates(8, 6, 0x50, [1, 2]) },
       ...base ? [{ interfaceNumber: 5, alternates: alternates(VENDOR_CLASS, VENDOR_SUBCLASS, VENDOR_PROTOCOL) }] : []]
     const device = {
-      opened: false, configuration: { interfaces },
+      opened: false, configuration: { interfaces }, vendorId: ELEKTRON_VENDOR_ID, productId: OCTATRACK_PRODUCT_ID,
       async open() { device.opened = true }, async close() { device.opened = false },
       async selectConfiguration() {},
       async claimInterface() { if (unit.taken) throw new DOMException('Unable to claim interface.', 'NetworkError') },
@@ -101,6 +125,7 @@ export function fakeUnit(kind: 'base' | 'stock' | 'none' = 'base'): FakeUnit {
           })
           return { status: 'ok', data: view }
         }
+        if (setup.request === 39 && unit.slots) return { status: 'ok', data: new DataView(unit.slots.slice().buffer) }
         if (setup.request === 27) { // INVENTORY, 13 a page from wValue: no DSP code, no name
           const page = unit.modules.slice(setup.value, setup.value + 13), list = new DataView(new ArrayBuffer(4 + 24 * page.length))
           ;[0x4d, 0x57, 0x49, page.length].forEach((byte, i) => list.setUint8(i, byte))
@@ -114,7 +139,7 @@ export function fakeUnit(kind: 'base' | 'stock' | 'none' = 'base'): FakeUnit {
           ;[380 + wave(0), 520 + wave(2), 640, 260 + wave(4), 410].forEach((value, i) => load.setUint32(28 + 4 * i, value))
           return { status: 'ok', data: load }
         }
-        const refusal = unit.refusal ?? unit.publishRefusal ?? (unit.writeRefusal ? 100 + unit.writeRefusal : undefined)
+        const refusal = unit.refusal ?? unit.publishRefusal ?? (unit.writeRefusal ? 100 + unit.writeRefusal : unit.flashed === '' ? 107 : undefined)
         if (setup.request === 21 && unit.status && refusal === undefined) { // passed, peaks, saved on the card and read back
           const record = new DataView(new ArrayBuffer(SELFTEST_BYTES)), count = unit.installed.moduleIds.length
           ;[[0, 2], [3, count], [7, 410], [8, 655], [9, 470], [14, 47900], [15, 7], [16, count], [17, count]].forEach(([at, value]) => record.setUint32(4 * at, value))
@@ -150,9 +175,11 @@ export function fakeSession(unit: FakeUnit, delay = 0) {
   return async (_transport?: unknown, _base?: string, options: { timeoutMs?: number } = {}): Promise<LinkSession> => {
     if ((options.timeoutMs ?? 0) > UPLOAD_TIMEOUT_MAX_MS) throw new Error('Upload timeout must be at most ' + UPLOAD_TIMEOUT_MAX_MS + ' ms.') // as UploadSession.connect
     let status: UploadStatus = { command: 'hello', transaction: 0, result: 'ok', phase: unit.staged ? 'receiving' : unit.orphan ? 'trial' : 'normal', activeKnown: true, generation: unit.orphan ? 1 : 0,
-      lastTransaction: unit.orphan ? 7 : 0, currentTransaction: unit.orphan ? 7 : 0, received: 0, capacity: 262144, base: unit.base, session: '00'.repeat(32),
+      lastTransaction: unit.orphan ? 7 : 0, currentTransaction: unit.orphan ? 7 : 0, received: 0, capacity: unit.capacity ?? 262144, base: unit.base, session: '00'.repeat(32),
       active: unit.orphan ?? unit.active }
     let staged = unit.active, owned = false, data: Uint8Array | undefined
+    // The base a staged container holds: its section's image. A base before the two slots writes only itself.
+    const written = () => unit.slots ? fakeBaseOf(depackSection(data!.subarray(0x12))) : unit.base
     const step = async (phase: UploadPhaseName, refuse?: UploadResultName) => {
       await wait()
       if (refuse) throw new UploadDeviceError(status = { ...status, result: refuse })
@@ -165,6 +192,7 @@ export function fakeSession(unit: FakeUnit, delay = 0) {
       async stage(pkg, { signal, progress } = {}) {
         if (unit.playing) return step('normal', 'unsafe')
         if (unit.refusal) return step('normal', 'rejected')
+        if (unit.stageLosses && String.fromCharCode(...pkg.data.subarray(0, 4)) === 'ELEK' && unit.stageLosses-- > 0) { await wait(); throw new UploadUnconfirmedError('hello was not confirmed', status) }
         staged = pkg.sha256; data = pkg.data
         for (let sent = 0; sent < pkg.data.length;) {
           if (signal?.aborted) { status = { ...status, phase: 'normal' }; throw new DOMException('Module staging cancelled.', 'AbortError') }
@@ -176,12 +204,20 @@ export function fakeSession(unit: FakeUnit, delay = 0) {
       activate: async () => {
         const container = !!data && String.fromCharCode(...data.subarray(0, 4)) === 'ELEK'
         if (unit.publishRefusal || container && unit.writeRefusal) { await wait(); throw new UploadDeviceError(status = { ...status, phase: 'ready', result: 'backend' }) } // the package dropped
-        const published = await step('pending')
+        if (container && unit.writeFails && unit.writeFails-- > 0) { unit.flashed = ''; await wait(); throw new UploadDeviceError(status = { ...status, phase: 'recovery', result: 'needs-recovery', activeKnown: false }) }
+        if (container && unit.writeDropouts && unit.writeDropouts-- > 0) {
+          const target = written(), restarts = !unit.slots || target !== unit.base
+          unit.flashed = target; unit.unplug()
+          setTimeout(() => { unit.plug('base'); if (restarts) setTimeout(() => { unit.base = unit.active = target; unit.unplug(); unit.plug('base') }, delay + 500) }, delay + 100)
+          throw new UploadUnconfirmedError('The activation reply was lost.', status)
+        }
+        // Publication makes the staged package the active one (upload.c mu_publish), a base's container as well.
+        const published = status = { ...await step('pending'), active: staged }
         // A RAM boot image (boot.c): the unit restarts half a second on. Only the flashed base's gate reads the mailbox, so
         // armed from a base running out of RAM it comes back on the flashed one; from that one, on the image's base.
         if (data && data.length >= 4 && new DataView(data.buffer, data.byteOffset).getUint32(0) === 0x4fefffe4) {
-          const next = unit.base === unit.flashed ? fakeBaseOf(data) : unit.flashed
-          setTimeout(() => { unit.base = unit.active = next; unit.unplug(); unit.plug('base') }, delay)
+          const next = unit.base === unit.flashed && !unit.fromRam ? fakeBaseOf(data) : unit.flashed
+          setTimeout(() => { unit.base = unit.active = next; unit.fromRam = false; unit.unplug(); if (!(unit.bootHangs && unit.bootHangs-- > 0)) unit.plug('base') }, delay)
         }
         return published
       },
@@ -189,8 +225,12 @@ export function fakeSession(unit: FakeUnit, delay = 0) {
       holdTrial: () => step('pending', unit.playing ? 'unsafe' : undefined),
       accept: async () => {
         await step('ready'); unit.active = status.active!; unit.installed = unit.pending ?? unit.installed; unit.pending = undefined
-        if (data && String.fromCharCode(...data.subarray(0, 4)) === 'ELEK') { // the base wrote its own container to NOR (flash.c): it restarts on it
-          setTimeout(() => { unit.flashed = unit.base; unit.active = unit.base; unit.unplug(); unit.plug('base') }, delay)
+        if (data && String.fromCharCode(...data.subarray(0, 4)) === 'ELEK') { // a base written to NOR (flash.c)
+          const target = written()
+          unit.flashed = target
+          if (unit.slots) { unit.slots = unit.slots.slice(); unit.slots[4] = 1 } // two slots now
+          if (unit.restartHangs) setTimeout(() => { unit.base = unit.active = target; unit.unplug() }, delay)
+          else if (!unit.slots || target !== unit.base) setTimeout(() => { unit.base = unit.active = target; unit.unplug(); unit.plug('base') }, delay)
           return status
         }
         const apply = (pkg: Uint8Array) => {
@@ -237,17 +277,24 @@ export function previewKit() {
   const unit = fakeUnit(kind === 'stock' || kind === 'none' ? kind : 'base')
   unit.installed = { moduleIds: params.get('inventory') === 'empty' ? [] : ['everb', 'airwindows-chorus', 'poly8'], removedStockFx: [] }
   unit.status = params.get('status') !== 'old'
+  // &base=older: a unit on an older base, so the base dialog offers the update over USB; &slots=one|two: what the
+  // base's SLOTS says (one copy: Send, Restart, Save; two slots: Send, Save, Restart), absent for a base before them.
+  if (params.get('base') === 'older') unit.base = unit.flashed = unit.active = 'aa'.repeat(32)
+  const slots = params.get('slots')
+  if (slots === 'one' || slots === 'two') {
+    unit.slots = new Uint8Array(24)
+    unit.slots.set([0x4d, 0x57, 0x53, 0x53, slots === 'two' ? 1 : 0, slots === 'two' ? 0 : 0xff])
+  }
   if (params.get('missing') === 'project') unit.project = [{ id: 'everb', name: 'E-Verb' }, { id: 'euclid', name: 'Euclid' }, { id: 'airwindows-chorus', name: 'Air Chorus' }, { id: 'tapehead', name: 'TapeHead' }]
   Object.assign(window, { modwerkUsbPreview: unit })
   return {
     link: new OctatrackLink(unit.usb, fakeSession(unit, 60)),
-    // A pretend load, stress test and inventory, so the whole flow can be clicked through.
+    // A pretend load and inventory, so the whole flow can be clicked through.
     prepareUpdate: async (target: InventoryTarget) => {
       await wait(400); unit.pending = { moduleIds: target.moduleIds, removedStockFx: target.removedStockFx ?? [] }
       // Each load stages different bytes, so the unit's active digest (and the inventory read after Keep) changes.
       return { name: target.name, changes: [{ module: target.name, data: new TextEncoder().encode(JSON.stringify(unit.pending).padEnd(160 * 1024)) }] }
     },
     readInventory: async () => { await wait(150); return structuredClone(unit.installed) },
-    stressTest: async () => { await wait(2500); return null },
   }
 }

@@ -10,11 +10,17 @@ export function BugReportNotice({ tracker }: { tracker: IssueTracker | null }) {
   const published = tracker?.tracker === 'github' ? 'The title, description, device, module version, configuration, build fingerprint and any attached log are public there under your username, and the developers reply there.' : 'The title, description, device and module version are public under your username; your configuration, build fingerprint and any attached log stay private to you, the module’s maintainers and the administrator.'
   return <p className="service-note">Posting {where}. {published} Leave out firmware and personal information.</p>
 }
-/** Beta testers report on Discord (the beta tester note asks them to); the form stays usable, this only reminds them. */
-export function BetaReportReminder() {
+/** Before a report: modules are free, and their authors owe no fix or reply time (the community rules say the same). */
+export function AuthorExpectations() {
+  return <p className="service-note">Modules are free, and most are made by one person in their spare time. Their authors owe no fix or reply time; clear steps and a log get a fix fastest. <a href="#community-rules">Community rules</a></p>
+}
+/** Beta testers report bugs in beta modules and beta pages on Discord (the beta tester note asks them to): shown to them
+ * only in a report about one (`beta`: a beta module, or a set holding one). The base, a sync and released modules are
+ * reported here by everyone. The form stays usable; this only reminds them. */
+export function BetaReportReminder({ beta }: { beta: boolean }) {
   const { session } = useCommunity()
-  if (!session.user?.betaTester) return null
-  return <p className="beta-report-reminder" role="note"><Icon name="warn" size={16}/><span><strong>Beta tester?</strong> Please report bugs only in <a href={DEVELOPMENT_DISCORD_URL} target="_blank" rel="noreferrer">#beta-testers on Discord</a>, not through this form.</span></p>
+  if (!beta || !session.user?.betaTester) return null
+  return <p className="beta-report-reminder" role="note"><Icon name="warn" size={16}/><span><strong>Beta module?</strong> Please report bugs in beta modules only in <a href={DEVELOPMENT_DISCORD_URL} target="_blank" rel="noreferrer">#beta-testers on Discord</a>, not through this form. Problems with the base, a sync or a released module belong here.</span></p>
 }
 /** Open issues first, so a reporter can add to one instead of filing it again. */
 export function ExistingIssues({ id, tracker }: { id: string; tracker: IssueTracker | null }) {
