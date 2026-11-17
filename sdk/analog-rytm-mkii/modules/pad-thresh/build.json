@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
   "sources": [
-    "src/main.c"
+    "src/main.c",
+    "src/hooks.s"
   ],
   "defsym": {},
   "cflags": [],
@@ -28,7 +29,10 @@
   "copied": [],
   "regions": [],
   "claims": [
-    "ui:FUNC + encoder H turn"
+    "ui:FUNC + encoder G turn",
+    "ui:FUNC + encoder H turn",
+    "pad:strike force readout (0x40082200)",
+    "pad:strike velocity curve (0x40082258)"
   ],
   "requires": [],
   "derive": null,
@@ -40,7 +44,22 @@
         "-DIS_KEY_HELD_AT=0x40081c28",
         "-DTHRESH_AT=0x40285984"
       ],
-      "sites": []
+      "sites": [
+        {
+          "addr": "0x40082200",
+          "len": 6,
+          "stockSha256": "6128f37da139d8fe18a639eeb98cbb8c3b7977e1c10b681be39c492e70a2a3fa",
+          "op": "jsr",
+          "target": "pad_thresh_force"
+        },
+        {
+          "addr": "0x40082258",
+          "len": 18,
+          "stockSha256": "3366482274ffb2023d8406575f4adf76b09b82c0870c808fc9ac271843bfdd78",
+          "op": "jsr",
+          "target": "pad_thresh_curve"
+        }
+      ]
     }
   }
 }
