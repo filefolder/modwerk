@@ -204,6 +204,74 @@
      "container": 797816
     }
    }
+  },
+  {
+   "base": "0.7.5",
+   "identity": "59c85053c23be780af95983730123b1c2eb101111128c832412f2e08dd9a3d94",
+   "layouts": {
+    "tracks-main-cue": {
+     "main": 1320005,
+     "container": 799828
+    },
+    "tracks": {
+     "main": 1319865,
+     "container": 799680
+    },
+    "tracks-post": {
+     "main": 1321470,
+     "container": 801436
+    },
+    "main-cue": {
+     "main": 1319779,
+     "container": 799580
+    },
+    "main": {
+     "main": 1319639,
+     "container": 799420
+    },
+    "master": {
+     "main": 1319661,
+     "container": 799448
+    },
+    "off": {
+     "main": 1318235,
+     "container": 797812
+    }
+   }
+  },
+  {
+   "base": "0.7.7",
+   "identity": "b3be9a5fb31e5bfa01d1cb082f88cc470934096d7105747fe4eb876d1760b96a",
+   "layouts": {
+    "tracks-main-cue": {
+     "main": 1320518,
+     "container": 800472
+    },
+    "tracks": {
+     "main": 1320371,
+     "container": 800332
+    },
+    "tracks-post": {
+     "main": 1321980,
+     "container": 802108
+    },
+    "main-cue": {
+     "main": 1320285,
+     "container": 800196
+    },
+    "main": {
+     "main": 1320145,
+     "container": 800080
+    },
+    "master": {
+     "main": 1320165,
+     "container": 800084
+    },
+    "off": {
+     "main": 1318746,
+     "container": 798432
+    }
+   }
   }
  ]
 }
