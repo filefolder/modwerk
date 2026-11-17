@@ -32,7 +32,9 @@
     "ui:FUNC + encoder G turn",
     "ui:FUNC + encoder H turn",
     "pad:strike force readout (0x40082200)",
-    "pad:strike velocity curve (0x40082258)"
+    "pad:strike velocity curve (0x40082258)",
+    "pad:panel pad event post (0x4008232c)",
+    "pad:panel key event post (0x40082492)"
   ],
   "requires": [],
   "derive": null,
@@ -58,6 +60,20 @@
           "stockSha256": "3366482274ffb2023d8406575f4adf76b09b82c0870c808fc9ac271843bfdd78",
           "op": "jsr",
           "target": "pad_thresh_curve"
+        },
+        {
+          "addr": "0x4008232c",
+          "len": 6,
+          "stockSha256": "d10ca2a6bdcdf1414d90bd900235f6174ea690fdf7b9d1a9feb00fbde765f9c8",
+          "op": "jsr",
+          "target": "pad_thresh_post_pad"
+        },
+        {
+          "addr": "0x40082492",
+          "len": 6,
+          "stockSha256": "d10ca2a6bdcdf1414d90bd900235f6174ea690fdf7b9d1a9feb00fbde765f9c8",
+          "op": "jsr",
+          "target": "pad_thresh_post_key"
         }
       ]
     }

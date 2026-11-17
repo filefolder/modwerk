@@ -18,17 +18,17 @@ The earlier version of this experiment looked for a pad map near `0x40285608`, f
 - **FUNC + turn H:** T, 0 to 40 (stock 10), written only if the address held 10 at the first turn.
 - **FUNC + turn G:** the curve. 0 is stock's, 1 linear (the scaled force as it is), 2 soft (`255 * (2x - x^2)`). With 1 and 2, nothing at or below T plays.
 
-Each step is two encoder counts. After the first such turn, a box in the top right shows for about 10 s after every turn and every strike:
+Each step is two encoder counts. After the first such turn, a full-screen log shows for about 10 s after every turn and every key or pad event the panel driver posts (`0x4008232c` for pad strikes and pressure, `0x40082492` for key presses and releases, pads included). The top line shows T, C and P (pad pressure events counted, not logged). Below it are the last 8 events, newest at the top:
 
-| Row | Shows |
+| Column | Shows |
 | --- | --- |
-| T | the threshold (0 with a cross: the stock value was not found, nothing is written) |
-| C | the curve |
-| F | the last strike's force byte, as the pad sent it |
-| V | its velocity, 0-255; 0 means stock dropped it |
-| N | strikes counted, 0-99 |
+| K or S | a key event, or a pad strike |
+| 2 hex digits | the key or pad code |
+| 2 hex digits | a key's flags (bit 0: pressed), or a strike's velocity (0 means stock dropped it) |
+| 3 digits | a strike's force byte, as the pad sent it |
+| 4 digits | panel ticks (probably ms) since the event before |
 
-A tap that changes none of F, V and N never reached the OS as a strike: the panel dropped it.
+PT03 showed that a light tap which toggles a mute posts no strike at all: the panel drops it. This log shows whether a strike comes before or after its pad's press, which decides whether a press without a strike can play at once.
 
 ## Safety
 
@@ -38,7 +38,7 @@ Nothing is written unless the address holds the stock value 10 at the first turn
 
 ```sh
 MODWERK_CROSS=m68k-linux-gnu- node scripts/link-image.mjs --stock /path/to/Analog-Rytm_MKII_OS1.74.syx \
-  --version PT03 --out pad-thresh.syx \
+  --version PT04 --out pad-thresh.syx \
   --elemod vendor/elekloader/catalog/core-ar2-0.7.elemod --module analog-rytm-mkii:pad-thresh
 ```
 

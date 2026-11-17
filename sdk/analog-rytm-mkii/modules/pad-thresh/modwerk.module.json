@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "id": "pad-thresh",
   "name": "Pad Thresh",
-  "version": "0.2.0-experimental",
+  "version": "0.3.0-experimental",
   "machine": "analog-rytm-mkii",
   "category": "system",
   "exclusive": false,
@@ -21,7 +21,7 @@
     "summary": "Shows each pad strike's force and velocity, and tries a lower threshold and other velocity curves live.",
     "overview": "A throwaway experiment for the Analog Rytm MKII. OS 1.74 drops a pad strike whose force is at or below a threshold, 10, before it turns the rest into a velocity. FUNC + encoder H lowers or raises that threshold live and shows it in a small box, once it has confirmed the stock value is at its address. RAM only: a power cycle restores stock. Not for release.",
     "highlights": [
-      "Shows each pad strike's force, velocity and count",
+      "Logs the order and timing of pad presses and strikes",
       "Changes the strike threshold (FUNC + H) and the velocity curve (FUNC + G) live"
     ],
     "usage": [
@@ -29,10 +29,10 @@
     ]
   },
   "access": {
-    "location": "A box in the top right corner for about 10 s after each FUNC + G or H turn and each pad strike.",
+    "location": "A full-screen log for about 10 s after each FUNC + G or H turn and each key or pad event.",
     "steps": [
       "Install the build and boot the unit.",
-      "Hold FUNC and turn encoder H (threshold) or G (curve): the box shows T, C, and the last strike's F, V and N.",
+      "Hold FUNC and turn encoder H once: the log shows the last 8 key and pad events with their timing.",
       "Tap the pads and judge how light a touch plays."
     ],
     "screenshots": []
@@ -63,7 +63,9 @@
       "ui:FUNC + encoder G turn",
       "ui:FUNC + encoder H turn",
       "pad:strike force readout (0x40082200)",
-      "pad:strike velocity curve (0x40082258)"
+      "pad:strike velocity curve (0x40082258)",
+      "pad:panel pad event post (0x4008232c)",
+      "pad:panel key event post (0x40082492)"
     ]
   },
   "resources": {

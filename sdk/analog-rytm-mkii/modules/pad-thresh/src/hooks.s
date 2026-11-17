@@ -45,3 +45,24 @@ pad_thresh_curve:
         ext.l   %d1
 9:      move.b  %d1,pt_last_vel
         rts
+
+        | Two more sites, the panel driver's posts of a UI event to the queue,
+        | each a jsr 0x400013b2 (queue, event) whose caller reloads d0-d1/a0-a1.
+        | Each logs the event, then jumps to the stock routine with the stack
+        | as the caller left it, so it returns to the caller.
+        |   0x4008232c (6)   pad pressure (type 2) and pad strike (type 3)
+        |   0x40082492 (6)   a key press or release (type 0), pads included
+
+        .globl  pad_thresh_post_pad
+pad_thresh_post_pad:
+        move.l  8(%sp),-(%sp)           | the event
+        jsr     pt_log
+        addq.l  #4,%sp
+        jmp     0x400013b2
+
+        .globl  pad_thresh_post_key
+pad_thresh_post_key:
+        move.l  8(%sp),-(%sp)
+        jsr     pt_log
+        addq.l  #4,%sp
+        jmp     0x400013b2
