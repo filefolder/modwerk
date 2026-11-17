@@ -85,6 +85,7 @@ typedef void (*post_t)(void *queue, void *event);
 #define TAPS 8
 static int tap_vel;                    // 0 = off
 static unsigned pending[PADS];         // 1 + the tick of a press still waiting for its strike, else 0
+static unsigned struck[PADS];          // 1 + the tick of the pad's last strike, else 0
 static struct { unsigned char type, pad[3]; int code; unsigned char vel, pad2[3]; unsigned time; } taps[TAPS];
 static unsigned tap_next;
 #define LOG 8
@@ -110,13 +111,17 @@ void pt_log(char *ev)
     e->dt = (now - last_tick) & 0xfff;
     if (ev[0] == 0) {
         unsigned key = (unsigned)*(int *)(ev + 4) - PAD_KEY;
-        if (key < PADS && (ev[11] & 1))
+        // A strike can come just before its press: a press within TAP_MS of
+        // its pad's strike already played.
+        if (key < PADS && (ev[11] & 1) && !(struck[key] && ((now - (struck[key] - 1)) & 0xfff) <= TAP_MS))
             pending[key] = 1 + now;
     } else if (ev[0] == 3) {
         int p;
         for (p = 0; p < PADS; p++)
-            if (STRIKE_CODES[p] == *(int *)(ev + 4))
+            if (STRIKE_CODES[p] == *(int *)(ev + 4)) {
                 pending[p] = 0;
+                struck[p] = 1 + now;
+            }
     }
     last_tick = now;
     log_seq++;
