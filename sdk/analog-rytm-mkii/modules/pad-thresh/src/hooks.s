@@ -66,3 +66,12 @@ pad_thresh_post_key:
         jsr     pt_log
         addq.l  #4,%sp
         jmp     0x400013b2
+
+        | The panel task (0x4008193c, about every millisecond) bumps its counter
+        | at 0x40081944 (6); d0-d1/a0-a1 are dead there. The stub does that
+        | and lets pt_poll post a light tap's strike.
+        .globl  pad_thresh_ms
+pad_thresh_ms:
+        addq.l  #1,0x42f92114           | the replaced instruction
+        jsr     pt_poll
+        rts

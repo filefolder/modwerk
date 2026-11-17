@@ -27,6 +27,12 @@
 //   2 hex digits a key's flags (bit 0: pressed) or a strike's velocity
 //   3 digits     a strike's force byte, as the pad sent it
 //   4 digits     the panel ticks (probably ms) since the event before, at most 9999
+// Light taps (0.4): the panel posts a pad's key press (keys 0x90-0x9b) and,
+// for a firm hit, its strike in the same millisecond; a light tap gets no
+// strike at all. FUNC + turn F sets a velocity (0-255 in steps of 8; 0, the
+// default, is off). When on, a pad press with no strike TAP_MS later gets a
+// strike at that velocity, built as the panel driver builds one and posted to
+// the same queue. It shows in the log as L.
 // Everything lives in RAM: a power cycle restores stock.
 
 typedef void (*fillrect_t)(void *bmp, int x0, int y0, int x1, int y1, int colour);
@@ -36,6 +42,7 @@ typedef unsigned (*is_key_held_t)(int key);
 #define THRESH (*(volatile int *)THRESH_AT)
 
 #define KEY_FUNC 0x80
+#define ENC_F 5
 #define ENC_G 6                // ev_enc on the Rytm: encoders 0-7 are A-H
 #define ENC_H 7
 #define STOCK 10               // the stock threshold
@@ -57,16 +64,29 @@ static int show_ticks;
 static int redraw;
 
 // 3 x 5 glyphs, the top row first, bit 2 the left pixel: 0-F, then T C P K S.
-enum { G_T = 16, G_C, G_P, G_K, G_S };
-static const unsigned char glyphs[21][5] = {
+enum { G_T = 16, G_C, G_P, G_K, G_S, G_L, G_V };
+static const unsigned char glyphs[23][5] = {
     {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1},
     {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7}, {7, 5, 7, 1, 7},
     {2, 5, 7, 5, 5}, {6, 5, 6, 5, 6}, {7, 4, 4, 4, 7}, {6, 5, 5, 5, 6}, {7, 4, 6, 4, 7},
     {7, 4, 6, 4, 4}, {7, 2, 2, 2, 2}, {7, 4, 4, 4, 7}, {6, 5, 6, 4, 4}, {5, 5, 6, 5, 5},
-    {3, 4, 2, 1, 6},
+    {3, 4, 2, 1, 6}, {4, 4, 4, 4, 7}, {5, 5, 5, 5, 2},
 };
 
 #define TICKS (*(volatile unsigned *)0x42f92114)   // the panel task's counter, kept below 4096
+#define QUEUE (*(void **)0x40285980)            // the panel driver's UI event queue
+#define STRIKE_CODES (*(int **)0x40285968)      // pad index -> a strike's code
+#define NOW (*(volatile unsigned *)0x8000fe54)  // the time stamp the driver puts in an event
+typedef void (*post_t)(void *queue, void *event);
+#define POST ((post_t)0x400013b2)
+#define PADS 12
+#define PAD_KEY 0x90
+#define TAP_MS 3
+#define TAPS 8
+static int tap_vel;                    // 0 = off
+static unsigned pending[PADS];         // 1 + the tick of a press still waiting for its strike, else 0
+static struct { unsigned char type, pad[3]; int code; unsigned char vel, pad2[3]; unsigned time; } taps[TAPS];
+static unsigned tap_next;
 #define LOG 8
 struct entry { unsigned char kind, code, value, force; unsigned dt; };
 static struct entry log_ring[LOG];
@@ -91,6 +111,16 @@ void pt_log(char *ev)
     e->value = (unsigned char)ev[ev[0] == 3 ? 8 : 11];   // a strike's velocity byte, a key's flags long
     e->force = ev[0] == 3 ? pt_last_force : 0;
     e->dt = (now - last_tick) & 0xfff;
+    if (ev[0] == 0) {
+        unsigned key = (unsigned)*(int *)(ev + 4) - PAD_KEY;
+        if (key < PADS && (ev[11] & 1))
+            pending[key] = 1 + now;
+    } else {
+        int p;
+        for (p = 0; p < PADS; p++)
+            if (STRIKE_CODES[p] == *(int *)(ev + 4))
+                pending[p] = 0;
+    }
     last_tick = now;
     log_seq++;
 }
@@ -122,12 +152,51 @@ static int clamp(int v, int lo, int hi)
     return v < lo ? lo : v > hi ? hi : v;
 }
 
+// Log an event the module made: kind 4, shown as L.
+static void log_tap(int code, int vel)
+{
+    struct entry *e = &log_ring[log_head];
+    unsigned now = TICKS & 0xfff;
+    log_head = (log_head + 1) % LOG;
+    if (log_n < LOG)
+        log_n++;
+    e->kind = 4;
+    e->code = (unsigned char)code;
+    e->value = (unsigned char)vel;
+    e->force = 0;
+    e->dt = (now - last_tick) & 0xfff;
+    last_tick = now;
+    log_seq++;
+}
+
+// Called from hooks.s by the panel task, about every millisecond.
+void pt_poll(void)
+{
+    unsigned now = TICKS & 0xfff;
+    int p, code;
+    for (p = 0; p < PADS; p++) {
+        if (!pending[p] || ((now - (pending[p] - 1)) & 0xfff) < TAP_MS)
+            continue;
+        pending[p] = 0;
+        code = STRIKE_CODES[p];
+        if (!tap_vel || code < 0)
+            continue;
+        taps[tap_next].type = 3;
+        taps[tap_next].code = code;
+        taps[tap_next].vel = (unsigned char)tap_vel;
+        taps[tap_next].time = NOW;
+        POST(QUEUE, &taps[tap_next]);
+        tap_next = (tap_next + 1) % TAPS;
+        log_tap(code, tap_vel);
+    }
+}
+
 // ev_enc: FUNC + turn H changes T, FUNC + turn G the curve; every other turn is left alone.
 int pad_thresh_enc(void *brain, char *ev)
 {
     int enc = *(int *)(ev + 12), delta = *(int *)(ev + 16), steps;
     (void)brain;
-    if ((enc != ENC_H && enc != ENC_G) || !IS_KEY_HELD(KEY_FUNC))
+    if ((enc != ENC_H && enc != ENC_G && enc != ENC_F) || !IS_KEY_HELD(KEY_FUNC))
         return 0;
     if (!state)
         state = THRESH == STOCK ? 1 : -1;
@@ -139,7 +208,9 @@ int pad_thresh_enc(void *brain, char *ev)
     acc -= steps * COUNTS_PER_STEP;
     if (!steps)
         return 1;
-    if (enc == ENC_G)
+    if (enc == ENC_F)
+        tap_vel = clamp(tap_vel + steps * 8, 0, 248);
+    else if (enc == ENC_G)
         pt_curve = clamp(pt_curve + steps, 0, CURVES - 1);
     else if (state > 0)
         THRESH = clamp(THRESH + steps, 0, MAX_VALUE);
@@ -182,11 +253,13 @@ void pad_thresh_draw(void *bmp, void *ctrl)
     number(bmp, (unsigned)pt_curve, 1, 10, 36, 62);
     glyph(bmp, G_P, 48, 62);
     number(bmp, pressure % 100, 2, 10, 54, 62);
+    glyph(bmp, G_V, 72, 62);
+    number(bmp, (unsigned)tap_vel, 3, 10, 78, 62);
     FILLRECT(bmp, 0, 55, 127, 55, 1);
     for (i = 0; i < (int)log_n; i++) {
         e = &log_ring[(log_head + LOG - 1 - (unsigned)i) % LOG];
         top = 52 - i * 7;
-        glyph(bmp, e->kind == 3 ? G_S : G_K, 2, top);
+        glyph(bmp, e->kind == 4 ? G_L : e->kind == 3 ? G_S : G_K, 2, top);
         x = number(bmp, e->code, 2, 16, 10, top);
         x = number(bmp, e->value, 2, 16, x + 4, top);
         if (e->kind == 3)

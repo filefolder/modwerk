@@ -29,12 +29,14 @@
   "copied": [],
   "regions": [],
   "claims": [
+    "ui:FUNC + encoder F turn",
     "ui:FUNC + encoder G turn",
     "ui:FUNC + encoder H turn",
     "pad:strike force readout (0x40082200)",
     "pad:strike velocity curve (0x40082258)",
     "pad:panel pad event post (0x4008232c)",
-    "pad:panel key event post (0x40082492)"
+    "pad:panel key event post (0x40082492)",
+    "pad:panel task tick (0x40081944)"
   ],
   "requires": [],
   "derive": null,
@@ -74,6 +76,13 @@
           "stockSha256": "d10ca2a6bdcdf1414d90bd900235f6174ea690fdf7b9d1a9feb00fbde765f9c8",
           "op": "jsr",
           "target": "pad_thresh_post_key"
+        },
+        {
+          "addr": "0x40081944",
+          "len": 6,
+          "stockSha256": "5750ddc16f2c2e4c67ef6f2bb3ac5faabbcd04371fa90ee5097bb917d26a9e65",
+          "op": "jsr",
+          "target": "pad_thresh_ms"
         }
       ]
     }
