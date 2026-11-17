@@ -97,25 +97,22 @@ void pt_log(char *ev)
 {
     struct entry *e;
     unsigned now = TICKS & 0xfff;
-    if (ev[0] == 2) {
+    if (ev[0] == 2)
         pressure++;
-        log_seq++;
-        return;
-    }
     e = &log_ring[log_head];
     log_head = (log_head + 1) % LOG;
     if (log_n < LOG)
         log_n++;
     e->kind = (unsigned char)ev[0];
     e->code = (unsigned char)*(int *)(ev + 4);
-    e->value = (unsigned char)ev[ev[0] == 3 ? 8 : 11];   // a strike's velocity byte, a key's flags long
+    e->value = (unsigned char)ev[ev[0] == 0 ? 11 : 8];   // a key's flags long, else a strike's velocity or a pressure byte
     e->force = ev[0] == 3 ? pt_last_force : 0;
     e->dt = (now - last_tick) & 0xfff;
     if (ev[0] == 0) {
         unsigned key = (unsigned)*(int *)(ev + 4) - PAD_KEY;
         if (key < PADS && (ev[11] & 1))
             pending[key] = 1 + now;
-    } else {
+    } else if (ev[0] == 3) {
         int p;
         for (p = 0; p < PADS; p++)
             if (STRIKE_CODES[p] == *(int *)(ev + 4))
@@ -259,7 +256,7 @@ void pad_thresh_draw(void *bmp, void *ctrl)
     for (i = 0; i < (int)log_n; i++) {
         e = &log_ring[(log_head + LOG - 1 - (unsigned)i) % LOG];
         top = 52 - i * 7;
-        glyph(bmp, e->kind == 4 ? G_L : e->kind == 3 ? G_S : G_K, 2, top);
+        glyph(bmp, e->kind == 4 ? G_L : e->kind == 3 ? G_S : e->kind == 2 ? G_P : G_K, 2, top);
         x = number(bmp, e->code, 2, 16, 10, top);
         x = number(bmp, e->value, 2, 16, x + 4, top);
         if (e->kind == 3)

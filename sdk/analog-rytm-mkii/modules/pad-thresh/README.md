@@ -22,9 +22,9 @@ Each step is two encoder counts. After the first such turn, a full-screen log sh
 
 | Column | Shows |
 | --- | --- |
-| K or S | a key event, or a pad strike |
+| K, S, P or L | a key event, a pad strike, a pad pressure reading (0.5), or a light tap the module played |
 | 2 hex digits | the key or pad code |
-| 2 hex digits | a key's flags (bit 0: pressed), or a strike's velocity (0 means stock dropped it) |
+| 2 hex digits | a key's flags (bit 0: pressed), a strike's velocity (0 means stock dropped it), or a pressure reading's byte |
 | 3 digits | a strike's force byte, as the pad sent it |
 | 4 digits | panel ticks (probably ms) since the event before |
 
@@ -44,7 +44,7 @@ Nothing is written unless the address holds the stock value 10 at the first turn
 
 ```sh
 MODWERK_CROSS=m68k-linux-gnu- node scripts/link-image.mjs --stock /path/to/Analog-Rytm_MKII_OS1.74.syx \
-  --version PT05 --out pad-thresh.syx \
+  --version PT06 --out pad-thresh.syx \
   --elemod vendor/elekloader/catalog/core-ar2-0.7.elemod --module analog-rytm-mkii:pad-thresh
 ```
 
