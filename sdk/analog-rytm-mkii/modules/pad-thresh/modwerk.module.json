@@ -18,21 +18,21 @@
   "presentation": {
     "label": "PAD THRESH",
     "family": "Diagnostic",
-    "summary": "Shows and adjusts the pad strike threshold live, to test the pads' light-touch response.",
-    "overview": "A throwaway experiment for the Analog Rytm MKII. Stock ignores a pad strike whose force is at or below a threshold. This mod shows the memory around that threshold and lowers or raises it live with FUNC + encoder H, once it has confirmed the stock value is at the expected address. RAM only: a power cycle restores stock. Not for release.",
+    "summary": "Lowers the pad strike threshold live, to test the pads' light-touch response.",
+    "overview": "A throwaway experiment for the Analog Rytm MKII. OS 1.74 drops a pad strike whose force is at or below a threshold, 10, before it turns the rest into a velocity. FUNC + encoder H lowers or raises that threshold live and shows it in a small box, once it has confirmed the stock value is at its address. RAM only: a power cycle restores stock. Not for release.",
     "highlights": [
-      "Shows the threshold's memory on the screen",
-      "Changes the threshold live, only after finding the stock value"
+      "Changes the pad strike threshold live, 0 to 40",
+      "Writes only after finding the stock value 10"
     ],
     "usage": [
       "Hold FUNC and turn encoder H, then tap the pads lightly and compare."
     ]
   },
   "access": {
-    "location": "A full-screen overlay for about 10 s after each FUNC + encoder H turn.",
+    "location": "A small box in the top right corner for about 3 s after each FUNC + encoder H turn.",
     "steps": [
       "Install the build and boot the unit.",
-      "Hold FUNC and turn encoder H: the overlay appears and the threshold changes.",
+      "Hold FUNC and turn encoder H: the box shows the threshold as it changes.",
       "Tap the pads and judge how light a touch plays."
     ],
     "screenshots": []
@@ -46,13 +46,13 @@
     "conflicts": [],
     "limitations": [
       "Diagnostic only: not for release.",
-      "The threshold's address comes from an emulator note (rytm-emu) and is not confirmed on a unit.",
-      "Writes only when the stock value 10 is found at that address."
+      "The threshold's address is read from OS 1.74's pad code (0x400821fa) and not yet confirmed on a unit.",
+      "Writes only when the stock value 10 is found at that address; otherwise the box shows a cross."
     ]
   },
   "platform": {
     "kind": "elemod",
-    "core": "0.3",
+    "core": "0.7",
     "build": "build.json",
     "events": [
       "ev_tick",

@@ -38,8 +38,7 @@
       "cflags": [
         "-DFILLRECT_AT=0x40070726",
         "-DIS_KEY_HELD_AT=0x40081c28",
-        "-DTHRESH_AT=0x40285624",
-        "-DMAP_AT=0x40285608"
+        "-DTHRESH_AT=0x40285984"
       ],
       "sites": []
     }
