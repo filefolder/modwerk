@@ -239,11 +239,11 @@ const octatrack: FaqSection[] = [
           <p>An Octatrack on the Modwerk base reads its modules from one file on the card. That works from any browser and without the Octatrack at the computer.</p>
           <ol>
             <li>Add modules to your module set.</li>
-            <li>On <a href="#octatrack/setup">Setup</a>, choose <strong>Load from the card</strong> to download <code>{CARD_SET_FILE}</code>.</li>
+            <li>On <a href="#octatrack/setup">Setup</a>, choose <strong>Load from the card</strong>. If the card holds <code>MODWERK1.SET</code>, select it when prompted so the download takes priority and the other slot stays available for recovery.</li>
             <li>Copy it to the top folder of the card, outside every folder.</li>
             <li>Switch the Octatrack off and on. It starts with your modules.</li>
           </ol>
-          <p>The file fits the base it was written for. After a base update, download it again.</p>
+          <p>The file only loads on the base it was written for; on any other base the Octatrack starts without modules. After a base update, download it again. When the base you last downloaded or last synced from this browser is another one, the window after the download says so and offers the right base.</p>
         </>,
       },
       {

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { publishedUsbAudioPackage } from '../config/published-usb-audio.fixture'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,7 +9,7 @@ import { UploadUnconfirmedError } from '../engine/elekloader/upload-session'
 import { pendingBaseInstall, waitForBaseInstall } from '../config/octatrack-progress'
 import { BaseInstallDialog } from './BaseInstallDialog'
 import { pendingReask, resetReask } from '../community/diagnostics-reask'
-import baseBinding from '../../sdk/machines/octatrack/base-binding.json' with { type: 'json' }
+import { publishedBinding as baseBinding } from '../engine/elekloader/published-octatrack.fixture'
 import { USB_AUDIO_MODULE } from '../config/usb-audio'
 
 // The browser's download of the .bin; the guide's own steps are what is tested here.
@@ -38,7 +39,7 @@ async function connected(kind: 'stock' | 'base' | 'none', base?: string) {
 }
 type Props = Partial<Parameters<typeof BaseInstallDialog>[0]> & { link: OctatrackLink }
 function open(props: Props) {
-  const handlers = { onClose: vi.fn(), onReady: vi.fn(), onStage: vi.fn(), onChooseFirmware: vi.fn() }
+  const handlers = { onClose: vi.fn(), onReady: vi.fn(), onStage: vi.fn(), onStep: vi.fn(), onChooseFirmware: vi.fn() }
   const buildBase = vi.fn(async () => ({ buffer: new Uint8Array([1, 2]).buffer, sha256: 'ab'.repeat(32), base: expected }))
   const render = () => act(() => root.render(createElement(BaseInstallDialog, { firmwareReady: true, buildBase, ...handlers, ...props })))
   return { ...handlers, buildBase, render }
@@ -88,12 +89,27 @@ describe('the guided first install, for a member on the original OS', () => {
     expect(container.querySelector('#base-stage-title')?.textContent).toBe('Install it on your Octatrack')
     expect(pendingBaseInstall()?.expectedBase).toBe(expected)
   })
+  it('counts each step a run reaches once, from the Download step to Connect pressed', async () => {
+    const { link } = await connected('stock')
+    const guide = open({ link, firmwareReady: false }); await guide.render()
+    await act(() => root.render(createElement(BaseInstallDialog, { link, firmwareReady: false, firmwareError: 'This is not the original OS 1.40C.', buildBase: guide.buildBase, onClose: guide.onClose, onReady: guide.onReady, onStage: guide.onStage, onStep: guide.onStep, onChooseFirmware: guide.onChooseFirmware })))
+    await act(() => root.render(createElement(BaseInstallDialog, { link, firmwareReady: true, buildBase: guide.buildBase, onClose: guide.onClose, onReady: guide.onReady, onStage: guide.onStage, onStep: guide.onStep, onChooseFirmware: guide.onChooseFirmware })))
+    click(container.querySelector('.risk-accept input')!); click(container.querySelector('.risk-accept input')!); click(container.querySelector('.risk-accept input')!)
+    click(buttonNamed('Download base .bin')!); await settle(); await settle()
+    click(buttonNamed('File copied')!); click(buttonNamed('Back')!); click(buttonNamed('File copied')!) // a step met twice counts once
+    click(buttonNamed('Octatrack has started')!)
+    expect(container.textContent).toContain('Press Connect Octatrack and choose your Octatrack')
+    expect(container.textContent).toContain('Your Octatrack isn’t in the list?')
+    vi.spyOn(link, 'retry').mockResolvedValue(undefined)
+    click(buttonNamed('Connect Octatrack')!); click(buttonNamed('Connect Octatrack')!)
+    expect(guide.onStep.mock.calls.map(call => call[0])).toEqual(['card-download', 'os-file-refused', 'os-file-ready', 'risk-accepted', 'card-copy', 'card-install', 'card-connect', 'connect-pressed'])
+  })
   it('builds the first install in the layout of a set with the USB Audio module, else with USB Audio off, and says nothing of USB Audio going off', async () => {
     const { link } = await connected('stock')
     const withAudio = open({ link, set: { name: 'Live', moduleIds: ['everb', USB_AUDIO_MODULE], usbAudio: { layout: 'master' } } }); await withAudio.render()
     expect(container.textContent).not.toContain('USB Audio is off in this base')
     click(container.querySelector('.risk-accept input')!); click(buttonNamed('Download base .bin')!); await settle(); await settle()
-    expect(withAudio.buildBase.mock.calls).toEqual([['master']])
+    expect(withAudio.buildBase.mock.calls).toEqual([[publishedUsbAudioPackage ? undefined : 'master']])
     await act(() => root.unmount()); root = createRoot(container); sessionStorage.clear()
     const without = open({ link, set: { name: 'Live', moduleIds: ['everb'] } }); await without.render()
     expect(container.textContent).not.toContain('USB Audio is off in this base')
@@ -169,13 +185,30 @@ describe('the guided first install, for a member on the original OS', () => {
 })
 
 describe('a browser without WebUSB', () => {
-  it('lets the member prepare the base, and reports the missing WebUSB once as the guide’s failure and the link’s', async () => {
+  it('says first that USB needs a Chromium browser on a computer and leads through the card, and reports the missing WebUSB once', async () => {
     const link = new OctatrackLink(null), seen: string[] = []
     link.subscribeDiagnostics(event => seen.push(event.event + ':' + event.failure))
     const guide = open({ link }); await guide.render(); await settle()
-    expect(container.textContent).toContain('You can install the base from here. Afterwards your modules go onto the Octatrack as a file on the card')
+    // Before the steps, as a note: the card route is this browser's way, not a failure.
+    const route = container.querySelector('.base-install-route')!
+    expect(route.getAttribute('role')).toBe('note')
+    expect(route.textContent).toContain('USB needs Chrome, Edge or another Chromium browser on a computer.')
+    expect(route.textContent).toContain('install the base from the card in the steps below, then load your modules as one file on the card')
+    expect(route.compareDocumentPosition(container.querySelector('.base-install-progress')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(container.querySelector('[role=alert]')).toBeNull()
+    expect([...container.querySelectorAll('.base-install-progress li')].map(item => item.textContent)).toEqual(['1Download', '2Copy', '3Install', '4Load modules'])
     expect(guide.onStage.mock.calls).toEqual([['opened', undefined], ['failed', 'no-webusb']])
     expect(seen).toEqual(['link_failed:no-webusb'])
+    click(container.querySelector('.risk-accept input')!); click(buttonNamed('Download base .bin')!); await settle(); await settle()
+    click(buttonNamed('File copied')!); click(buttonNamed('Octatrack has started')!)
+    expect(container.querySelector('#base-stage-title')?.textContent).toBe('Now load your modules from the card')
+    expect(buttonNamed('Connect Octatrack')).toBeUndefined(); expect(buttonNamed('Open Setup')).toBeDefined()
+    expect(guide.onStep.mock.calls.map(call => call[0])).toEqual(['card-download', 'os-file-ready', 'risk-accepted', 'card-copy', 'card-install', 'card-load-from-card'])
+  })
+  it('says it on the first view too, as a note instead of a failure', async () => {
+    await open({ link: new OctatrackLink(null), launch: true }).render(); await settle()
+    expect(container.querySelector('.base-install-route')?.textContent).toContain('USB needs Chrome, Edge or another Chromium browser on a computer.')
+    expect(container.querySelector('.link-needs.is-missing')).toBeNull(); expect(container.querySelector('[role=alert]')).toBeNull()
   })
 })
 
